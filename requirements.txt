@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+supabase==2.8.1
+playwright
+google-genai
+python-dotenv
+httpx>=0.24
+websockets>=13.0.0
+python-multipart
+email-validator
