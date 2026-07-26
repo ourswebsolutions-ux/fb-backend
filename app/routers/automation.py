@@ -15,6 +15,8 @@ from app.models import (
     DraftPublisherAIRequest,
     DeleteAllListingsRequest,
     DraftPublisherRequest,
+    PublishListingRequest,
+    DeleteListingRequest,
     DraftDeleteRequest,
     AdsMultiplierRequest,
     WarmupRequest,
@@ -192,6 +194,25 @@ async def draft_delete(body: DraftDeleteRequest):
         max_delete=body.max_delete,
     )
     return {"task_id": task_id, "message": "Draft delete task started"}
+
+
+@router.post("/publish-listing")
+async def publish_listing(body: PublishListingRequest):
+    task_id = await fb.publish_listing(
+        account_id=str(body.account_id),
+        listing_id=str(body.listing_id),
+        delay_seconds=body.delay_seconds,
+    )
+    return {"task_id": task_id, "message": "Publish listing task started"}
+
+
+@router.post("/delete-listing")
+async def delete_listing(body: DeleteListingRequest):
+    task_id = await fb.delete_listing(
+        account_id=str(body.account_id),
+        listing_id=str(body.listing_id),
+    )
+    return {"task_id": task_id, "message": "Delete listing task started"}
 
 
 @router.post("/ads-multiplier")

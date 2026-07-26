@@ -191,6 +191,17 @@ class DraftPublisherRequest(BaseModel):
     delay_seconds: int = Field(default=15, ge=5, le=300)
 
 
+class PublishListingRequest(BaseModel):
+    account_id: str
+    listing_id: str
+    delay_seconds: int = Field(default=10, ge=2, le=120)
+
+
+class DeleteListingRequest(BaseModel):
+    account_id: str
+    listing_id: str
+
+
 class DraftDeleteRequest(BaseModel):
     account_id: str
     draft_ids: Optional[list[str]] = None

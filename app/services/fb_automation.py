@@ -50,6 +50,21 @@ def _save_cookies(account_id: str, cookies_json: str):
     db.table("fb_accounts").update({"cookies": cookies_json}).eq("id", account_id).execute()
 
 
+def _normalize_category(category: Optional[str]) -> Optional[str]:
+    if not category:
+        return None
+    cat = str(category).strip()
+    if not cat:
+        return None
+
+    normalized = cat.replace("_", " ").strip().lower()
+    if normalized == cat.lower():
+        return cat
+
+    parts = [w if w == "and" else w.capitalize() for w in normalized.split()]
+    return " ".join(parts)
+
+
 def _validate_images(images: list[str]) -> list[str]:
     """
     Verify every image path exists on disk.
@@ -100,7 +115,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
 
     print(f"[listing_form] ── START listing={listing_id_short} ──────────────────")
     print(f"[listing_form] Navigating to {MARKETPLACE_CREATE}")
-    await page.goto(MARKETPLACE_CREATE, timeout=25000)
+    await page.goto(MARKETPLACE_CREATE, timeout=85000)
     await page.wait_for_load_state("domcontentloaded", timeout=15000)
     await asyncio.sleep(3)  # let React fully render the form
 
@@ -158,7 +173,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
         # If still not on create page, navigate again
         if "create" not in current_url:
             print(f"[listing_form] Step 1.5 | Not on create page, navigating again...")
-            await page.goto(MARKETPLACE_CREATE, timeout=25000)
+            await page.goto(MARKETPLACE_CREATE, timeout=45000)
             await page.wait_for_load_state("domcontentloaded", timeout=15000)
             await asyncio.sleep(3)
             current_url = page.url
@@ -571,8 +586,15 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
     # FB renders Category as a combobox/listbox — click it then pick option.
     # ═══════════════════════════════════════════════════════════════════════════
     if listing.get("category"):
-        cat = listing["category"]
+        raw_cat = listing["category"]
+        cat = _normalize_category(raw_cat)
         print(f"[form] Step 6 | Setting Category: '{cat}'")
+        if not cat:
+            raise RuntimeError(
+                f"Category value is empty or unsupported: '{raw_cat}'. "
+                "Verify the listing category and use a supported Facebook category label."
+            )
+
         cat_el, cat_desc = await _find_visible([
             (page.get_by_label("Category"),                        "get_by_label('Category')"),
             (page.locator('[aria-label="Category"]'),              "aria-label=Category"),
@@ -593,7 +615,6 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
                 except Exception as e:
                     print(f"[form] Step 6 | select_option failed: {e}")
             else:
-                # Focus/click input to open Category dropdown, then try typeahead if needed
                 try:
                     handle = await cat_el.element_handle()
                     await page.evaluate("(el) => { el.scrollIntoView({block:'center'}); el.focus(); el.click(); }", handle)
@@ -604,6 +625,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
                 cat_selectors = [
                     f'[role="option"]:has-text("{cat}")',
                     f'div[role="option"]:has-text("{cat}")',
+                    f'button:has-text("{cat}")',
                     f'span:has-text("{cat}")',
                     f'li:has-text("{cat}")',
                 ]
@@ -611,7 +633,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
                 for c_sel in cat_selectors:
                     try:
                         opt_c = page.locator(c_sel).first
-                        if await opt_c.is_visible():
+                        if await opt_c.count() > 0 and await opt_c.is_visible():
                             try:
                                 await opt_c.click(force=True, timeout=5000)
                             except Exception:
@@ -625,12 +647,11 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
                         continue
 
                 if not clicked_cat:
-                    # Type category name to trigger FB typeahead filter
                     try:
                         await cat_el.fill(cat)
                         await asyncio.sleep(1.5)
                         opt_any = page.locator('[role="option"]').first
-                        if await opt_any.is_visible():
+                        if await opt_any.count() > 0 and await opt_any.is_visible():
                             try:
                                 await opt_any.click(force=True, timeout=5000)
                             except Exception:
@@ -885,6 +906,7 @@ async def _publish_listing(session: BrowserSession) -> str:
             await page.screenshot(path="debug_publish_post_error.png")
         except Exception:
             pass
+        await _discard_failed_create(session)
         raise RuntimeError(f"Facebook error after Publish click: {err_text}")
 
     # Extract listing ID from URL
@@ -927,6 +949,7 @@ async def _publish_listing(session: BrowserSession) -> str:
             await page.screenshot(path="debug_publish_stuck.png")
         except Exception:
             pass
+        await _discard_failed_create(session)
         raise RuntimeError(
             "Publish failed — browser still on create-item page after Publish click. "
             "Check debug_publish_stuck.png"
@@ -934,6 +957,272 @@ async def _publish_listing(session: BrowserSession) -> str:
 
     print(f"[publish] ── CONFIRMED PUBLISHED fb_id={fb_listing_id} ────────────")
     return fb_listing_id
+
+
+async def _discard_failed_create(session: BrowserSession) -> bool:
+    page = session.page
+    discard_selectors = [
+        'button:has-text("Discard")',
+        'div[role="button"]:has-text("Discard")',
+        'button:has-text("Do not save")',
+        'div[role="button"]:has-text("Do not save")',
+        'button:has-text("Don\'t save")',
+        'div[role="button"]:has-text("Don\'t save")',
+        'button:has-text("Leave")',
+        'div[role="button"]:has-text("Leave")',
+    ]
+
+    for sel in discard_selectors:
+        try:
+            button = page.locator(sel).first
+            if await button.count() > 0 and await button.is_visible():
+                try:
+                    await button.click(force=True, timeout=10000)
+                except Exception:
+                    handle = await button.element_handle()
+                    if handle:
+                        await page.evaluate("(el) => el.click()", handle)
+                await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+    if MARKETPLACE_CREATE in page.url or "/create" in page.url:
+        try:
+            await page.goto(MARKETPLACE_LISTINGS, timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await asyncio.sleep(2)
+        except Exception:
+            pass
+
+    return True
+
+
+async def _delete_fb_listing(session: BrowserSession, fb_id: str) -> bool:
+    page = session.page
+    item_url = f"https://www.facebook.com/marketplace/item/{fb_id}"
+    print(f"[delete_fb_listing] Navigating to {item_url}")
+    await page.goto(item_url, timeout=20000)
+    await page.wait_for_load_state("domcontentloaded", timeout=15000)
+    await asyncio.sleep(2)
+
+    menu_btn = page.locator(
+        '[aria-label*="more options" i], '
+        '[aria-label*="More" i], '
+        'button[aria-haspopup="menu"], '
+        'div[role="button"]:has-text("Actions")'
+    )
+    if await menu_btn.count() == 0:
+        print("[delete_fb_listing] No menu button found")
+        return False
+
+    await menu_btn.first.click(force=True)
+    await session.human_delay(800, 1400)
+
+    delete_btn = page.locator(
+        'div[role="menuitem"]:has-text("Delete"), '
+        'span:has-text("Delete listing"), '
+        'button:has-text("Delete")'
+    )
+    if await delete_btn.count() == 0:
+        print("[delete_fb_listing] No delete button found")
+        return False
+
+    await delete_btn.first.click(force=True)
+    await session.human_delay(900, 1600)
+
+    confirm_btn = page.locator('div[role="button"]:has-text("Delete"), button:has-text("Delete")')
+    if await confirm_btn.count() > 0:
+        await confirm_btn.first.click(force=True)
+        await session.human_delay(1000, 1600)
+
+    print("[delete_fb_listing] Delete workflow triggered")
+    return True
+
+
+async def publish_listing(
+    account_id: str,
+    listing_id: str,
+    delay_seconds: int,
+) -> str:
+    task_id = await create_task(
+        "publish_listing",
+        {"account_id": account_id, "listing_id": listing_id},
+    )
+    await update_task(task_id, status="running", total_steps=1, started_at=True)
+    _set_account_status(account_id, "active")
+
+    async def _run():
+        account = _get_account(account_id)
+        db = get_supabase()
+
+        async with _browser_manager.new_session(
+            proxy=account.get("proxy"),
+            cookies_json=account.get("cookies"),
+        ) as session:
+            logged_in = await _do_login(session, account)
+            if not logged_in:
+                await update_task(task_id, status="failed", error="Login failed", finished_at=True)
+                _set_account_status(account_id, "idle")
+                return
+
+            cookies = await session.save_cookies()
+            _save_cookies(account_id, cookies)
+
+            result = db.table("listings").select("*").eq("id", listing_id).limit(1).execute()
+            if not result.data:
+                await update_task(
+                    task_id,
+                    status="failed",
+                    error=f"Listing {listing_id} not found",
+                    finished_at=True,
+                )
+                _set_account_status(account_id, "idle")
+                return
+
+            listing = result.data[0]
+            if listing.get("status") != "draft":
+                await update_task(
+                    task_id,
+                    status="failed",
+                    error="Only draft listings can be published",
+                    finished_at=True,
+                )
+                _set_account_status(account_id, "idle")
+                return
+
+            try:
+                await _fill_listing_form(session, listing)
+                fb_id = await _publish_listing(session)
+                from datetime import datetime, timezone
+
+                _update_listing(
+                    listing_id,
+                    {
+                        "status": "published",
+                        "fb_listing_id": fb_id,
+                        "published_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                await write_log(
+                    "publish_listing",
+                    task_id=task_id,
+                    account_id=account_id,
+                    details={"listing_id": listing_id, "fb_id": fb_id},
+                )
+                await update_task(
+                    task_id,
+                    completed_steps=1,
+                    progress=100,
+                    status="completed",
+                    finished_at=True,
+                    result={"published": 1},
+                )
+            except Exception as e:
+                await write_log(
+                    "publish_listing",
+                    task_id=task_id,
+                    account_id=account_id,
+                    status="failed",
+                    error=str(e),
+                )
+                await update_task(
+                    task_id,
+                    status="failed",
+                    error=str(e),
+                    finished_at=True,
+                )
+
+        _touch_account(account_id)
+        _set_account_status(account_id, "idle")
+
+    run_background_task(_run(), task_id=task_id)
+    return task_id
+
+
+async def delete_listing(
+    account_id: str,
+    listing_id: str,
+) -> str:
+    task_id = await create_task(
+        "delete_listing",
+        {"account_id": account_id, "listing_id": listing_id},
+    )
+    await update_task(task_id, status="running", total_steps=1, started_at=True)
+    _set_account_status(account_id, "active")
+
+    async def _run():
+        account = _get_account(account_id)
+        db = get_supabase()
+
+        result = db.table("listings").select("*").eq("id", listing_id).limit(1).execute()
+        if not result.data:
+            await update_task(
+                task_id,
+                status="failed",
+                error=f"Listing {listing_id} not found",
+                finished_at=True,
+            )
+            _set_account_status(account_id, "idle")
+            return
+
+        listing = result.data[0]
+        fb_id = listing.get("fb_listing_id")
+
+        async with _browser_manager.new_session(
+            proxy=account.get("proxy"),
+            cookies_json=account.get("cookies"),
+        ) as session:
+            logged_in = await _do_login(session, account)
+            if not logged_in:
+                await update_task(task_id, status="failed", error="Login failed", finished_at=True)
+                _set_account_status(account_id, "idle")
+                return
+
+            cookies = await session.save_cookies()
+            _save_cookies(account_id, cookies)
+
+            try:
+                deleted = False
+                if fb_id:
+                    deleted = await _delete_fb_listing(session, fb_id)
+                    if not deleted:
+                        raise RuntimeError("Facebook delete workflow could not be completed")
+
+                _update_listing(listing_id, {"status": "deleted"})
+                await write_log(
+                    "delete_listing",
+                    task_id=task_id,
+                    account_id=account_id,
+                    details={"listing_id": listing_id, "fb_id": fb_id},
+                )
+                await update_task(
+                    task_id,
+                    completed_steps=1,
+                    progress=100,
+                    status="completed",
+                    finished_at=True,
+                    result={"deleted": 1},
+                )
+            except Exception as e:
+                await write_log(
+                    "delete_listing",
+                    task_id=task_id,
+                    account_id=account_id,
+                    status="failed",
+                    error=str(e),
+                )
+                await update_task(
+                    task_id,
+                    status="failed",
+                    error=str(e),
+                    finished_at=True,
+                )
+
+        _touch_account(account_id)
+        _set_account_status(account_id, "idle")
+
+    run_background_task(_run(), task_id=task_id)
+    return task_id
 
 
 async def _save_as_draft(session: BrowserSession):
@@ -2153,263 +2442,371 @@ async def fb_profile_updater(
     name: Optional[str],
     bio: Optional[str],
     location: Optional[str],
-    hometown: Optional[str] = None,
-    workplace: Optional[str] = None,
-    job_title: Optional[str] = None,
-    school: Optional[str] = None,
-    profile_pic_url: Optional[str] = None,
-    cover_pic_url: Optional[str] = None,
+    profile_pic_url: Optional[str],
+    cover_pic_url: Optional[str],
 ) -> str:
     task_id = await create_task(
         "fb_profile_updater",
         {"account_id": account_id},
     )
-    await update_task(task_id, status="running", total_steps=6, started_at=True)
+    await update_task(task_id, status="running", total_steps=3, started_at=True)
     _set_account_status(account_id, "active")
 
     async def _run():
         account = _get_account(account_id)
         print(f"[profile_updater] Starting for {account.get('email')}")
 
-        import os
-        from pathlib import Path as _Path
-        import re as _re
-
-        _is_docker = os.path.exists("/.dockerenv") or os.environ.get("RUNNING_IN_DOCKER") == "1"
-        from app.core.browser import BrowserManager as _BM
-        _profile_bm = _BM(headless=_is_docker)
-
-        async with _profile_bm.new_session(
+        async with _browser_manager.new_session(
             proxy=account.get("proxy"),
             cookies_json=account.get("cookies"),
         ) as session:
             logged_in = await _do_login(session, account)
             if not logged_in:
-                cookies_list = await session.context.cookies()
-                has_c_user = any(c.get("name") == "c_user" for c in cookies_list)
-                if not has_c_user:
-                    await update_task(
-                        task_id,
-                        status="failed",
-                        error="Login failed — account not verified or cookies expired. Please re-verify the account.",
-                        finished_at=True,
-                    )
-                    _set_account_status(account_id, "idle")
-                    return
-                print("[profile_updater] c_user cookie present — treating as logged in")
+                await update_task(task_id, status="failed", error="Login failed", finished_at=True)
+                _set_account_status(account_id, "idle")
+                return
 
             cookies = await session.save_cookies()
             _save_cookies(account_id, cookies)
             page = session.page
             updates_done = 0
-            errors: list[str] = []
+            errors = []
 
             try:
-                # ── Resolve profile URL / ID ──────────────────────────────────
-                await page.goto("https://www.facebook.com/profile.php", timeout=15000)
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                # Navigate to profile
+                print(f"[profile_updater] Navigating to profile...")
+                try:
+                    await page.goto("https://www.facebook.com/me", wait_until="domcontentloaded", timeout=30000)
+                except Exception as nav_err:
+                    print(f"[profile_updater] page.goto warning: {nav_err}")
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception:
+                    pass
                 await asyncio.sleep(2)
                 profile_url = page.url
                 print(f"[profile_updater] Profile URL: {profile_url}")
-                pid_match = _re.search(r"id=(\d+)", profile_url)
-                profile_id = pid_match.group(1) if pid_match else ""
-                print(f"[profile_updater] Profile ID: {profile_id}")
 
-                def _dir_url(sk: str) -> str:
-                    if profile_id:
-                        return f"https://www.facebook.com/profile.php?id={profile_id}&sk={sk}"
-                    return f"https://www.facebook.com/profile.php?sk={sk}"
+                # ── Bio update ─────────────────────────────────────────────────
+                if bio:
+                    print(f"[profile_updater] Updating bio: {bio}")
+                    bio_success = False
 
-                _ss_dir = _Path(__file__).parent.parent.parent / "debug_screenshots"
-                _ss_dir.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=str(_ss_dir / "debug_profile.png"))
+                    # Strategy 1: Look for direct bio buttons on profile page
+                    bio_selectors = [
+                        '[aria-label*="Add bio" i]',
+                        '[aria-label*="Edit bio" i]',
+                        'div[role="button"]:has-text("Add bio")',
+                        'div[role="button"]:has-text("Edit bio")',
+                        'div[role="button"]:has-text("Add Bio")',
+                        'div[role="button"]:has-text("Edit Bio")',
+                        'span:has-text("Add bio")',
+                        'span:has-text("Edit bio")',
+                    ]
 
-                # ── Helpers ───────────────────────────────────────────────────
-                async def _click_edit_and_fill(trigger_selectors, input_selectors, value, label):
-                    nonlocal updates_done
-                    if not value:
-                        return False
-                    clicked = False
-                    for tsel in trigger_selectors:
+                    for sel in bio_selectors:
                         try:
-                            el = page.locator(tsel).first
-                            if await el.is_visible(timeout=3000):
+                            el = page.locator(sel).first
+                            if await el.count() > 0 and await el.is_visible():
                                 await el.click()
                                 await asyncio.sleep(1.5)
-                                clicked = True
-                                print(f"[profile_updater] {label} trigger: {tsel}")
+                                print(f"[profile_updater] Clicked bio button: {sel}")
                                 break
                         except Exception:
                             pass
-                    if not clicked:
-                        errors.append(f"{label}: edit button not found")
-                        return False
 
-                    for isel in input_selectors:
+                    # Strategy 2: If no direct bio button worked, open "Edit profile" modal
+                    edit_prof_selectors = [
+                        'div[role="button"]:has-text("Edit profile")',
+                        '[aria-label*="Edit profile" i]',
+                        'span:has-text("Edit profile")',
+                        'div[role="button"]:has-text("Edit Profile")',
+                        'a:has-text("Edit profile")',
+                    ]
+                    for sel in edit_prof_selectors:
                         try:
-                            inp = page.locator(isel).first
-                            if await inp.is_visible(timeout=3000):
-                                await inp.triple_click()
-                                await asyncio.sleep(0.3)
-                                await inp.fill(value)
-                                await asyncio.sleep(0.5)
-                                for sv in [
-                                    'div[role="button"]:has-text("Save")',
-                                    'button:has-text("Save")',
-                                ]:
-                                    sv_el = page.locator(sv).first
-                                    if await sv_el.is_visible(timeout=2000):
-                                        await sv_el.click()
-                                        await asyncio.sleep(1.2)
-                                        updates_done += 1
-                                        print(f"[profile_updater] {label} saved!")
-                                        return True
+                            btn = page.locator(sel).first
+                            if await btn.count() > 0 and await btn.is_visible():
+                                await btn.click()
+                                await asyncio.sleep(2)
+                                print(f"[profile_updater] Clicked 'Edit profile' modal button")
+                                break
                         except Exception:
                             pass
-                    errors.append(f"{label}: input or save button not found")
-                    return False
 
-                async def _goto_dir(sk: str):
-                    base = _dir_url(sk)
-                    await page.goto(base, timeout=15000)
-                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                    await asyncio.sleep(2)
-                    await page.screenshot(path=str(_ss_dir / f"debug_{sk}.png"))
-                    print(f"[profile_updater] Navigated to {sk} → {page.url}")
+                    # Look for Bio add/edit inside modal if present
+                    modal_bio_btn = page.locator(
+                        'div[role="dialog"] div:has-text("Bio") div[role="button"], '
+                        'div[role="dialog"] [aria-label*="Bio" i], '
+                        'div[role="dialog"] [aria-label*="bio" i]'
+                    ).first
+                    if await modal_bio_btn.count() > 0 and await modal_bio_btn.is_visible():
+                        try:
+                            await modal_bio_btn.click()
+                            await asyncio.sleep(1.5)
+                            print(f"[profile_updater] Clicked modal bio button")
+                        except Exception:
+                            pass
 
-                # ── 1. Name ───────────────────────────────────────────────────
+                    # Search for bio input field (textarea or contenteditable div)
+                    bio_input = None
+                    for loc_str in [
+                        'textarea',
+                        'div[role="dialog"] textarea',
+                        'div[contenteditable="true"]',
+                        '[aria-label*="bio" i]',
+                        '[placeholder*="bio" i]',
+                        '[placeholder*="Describe" i]',
+                    ]:
+                        locs = page.locator(loc_str)
+                        c = await locs.count()
+                        for i in range(c):
+                            item = locs.nth(i)
+                            if await item.is_visible():
+                                bio_input = item
+                                print(f"[profile_updater] Found visible bio input field: {loc_str}")
+                                break
+                        if bio_input:
+                            break
+
+                    if bio_input:
+                        try:
+                            await bio_input.click()
+                            await asyncio.sleep(0.5)
+                            tag = await bio_input.evaluate("el => el.tagName.toLowerCase()")
+                            if tag in ["textarea", "input"]:
+                                await bio_input.focus()
+                                await bio_input.fill("")
+                                await bio_input.fill(bio)
+                            else:
+                                await bio_input.evaluate("el => el.innerText = ''")
+                                await bio_input.type(bio)
+                            await asyncio.sleep(1)
+
+                            # Click save button
+                            save_btn = page.locator(
+                                'div[role="dialog"] div[role="button"]:has-text("Save"), '
+                                'div[role="button"]:has-text("Save"), '
+                                'button:has-text("Save"), '
+                                '[aria-label="Save"]'
+                            ).first
+                            if await save_btn.count() > 0 and await save_btn.is_visible():
+                                await save_btn.click()
+                                await asyncio.sleep(2)
+                                updates_done += 1
+                                bio_success = True
+                                print(f"[profile_updater] Bio saved successfully")
+                        except Exception as e_bio:
+                            errors.append(f"Failed to fill/save bio: {e_bio}")
+                    else:
+                        errors.append("Bio input field not found")
+
+                await update_task(task_id, completed_steps=1, progress=33)
+
+                # ── Name update ────────────────────────────────────────────────
                 if name:
-                    await _goto_dir("about_contact_and_basic_info")
-                    await _click_edit_and_fill(
-                        trigger_selectors=[
-                            'div[role="button"]:has-text("Edit")',
-                            'span:has-text("Edit name")',
-                            '[aria-label*="Edit name" i]',
-                        ],
-                        input_selectors=[
-                            'input[name="firstname"]',
-                            'input[aria-label*="First" i]',
-                            'input[type="text"]',
-                        ],
-                        value=name,
-                        label="Name",
-                    )
-                    await update_task(task_id, completed_steps=1, progress=16)
+                    print(f"[profile_updater] Attempting Name update: {name}")
+                    try:
+                        await page.goto("https://accountscenter.facebook.com/personal_details", wait_until="domcontentloaded", timeout=20000)
+                        await asyncio.sleep(2)
+                        name_entry = page.locator('div:has-text("Name"), a[href*="name"], span:has-text("Name")').first
+                        if await name_entry.count() > 0:
+                            print(f"[profile_updater] Name section located in Meta Accounts Center")
+                            errors.append("Name update opened in Accounts Center — Meta security requires manual password confirmation")
+                        else:
+                            errors.append("Name update requires manual navigation to Settings — skipped")
+                    except Exception as e_name:
+                        errors.append(f"Name update navigation: {e_name}")
 
-                # ── 2. Bio / About ────────────────────────────────────────────
-                if bio:
-                    await _goto_dir("about")
-                    await _click_edit_and_fill(
-                        trigger_selectors=[
-                            'div[role="button"]:has-text("Edit")',
-                            'span:has-text("Add a bio")',
-                            'span:has-text("Edit bio")',
-                            '[aria-label*="bio" i]',
-                        ],
-                        input_selectors=[
-                            'textarea',
-                            'div[contenteditable="true"]',
-                            '[aria-label*="bio" i]',
-                        ],
-                        value=bio,
-                        label="Bio",
-                    )
-                    await update_task(task_id, completed_steps=2, progress=33)
+                await update_task(task_id, completed_steps=2, progress=66)
 
-                # ── 3. Current city / Location ────────────────────────────────
+                # ── Location update ────────────────────────────────────────────
                 if location:
-                    await _goto_dir("about_places")
-                    await _click_edit_and_fill(
-                        trigger_selectors=[
-                            'div[role="button"]:has-text("Edit")',
-                            'span:has-text("Add current city")',
-                            'span:has-text("Edit current city")',
-                            '[aria-label*="current city" i]',
-                        ],
-                        input_selectors=[
-                            'input[type="text"]',
-                            'input[aria-label*="city" i]',
-                            'div[contenteditable="true"]',
-                        ],
-                        value=location,
-                        label="Location",
-                    )
-                    await update_task(task_id, completed_steps=3, progress=50)
+                    print(f"[profile_updater] Location update: {location}")
+                    # Navigate to About > Places
+                    try:
+                        if "?" in profile_url:
+                            places_url = f"{profile_url}&sk=about_places"
+                        else:
+                            places_url = f"{profile_url.rstrip('/')}/about_places"
+                        await page.goto(places_url, wait_until="domcontentloaded", timeout=20000)
+                    except Exception as nav_err:
+                        print(f"[profile_updater] Location navigation warning: {nav_err}")
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=8000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(1)
+                    city_btn_selectors = [
+                        'div[role="button"]:has-text("Add current city")',
+                        'span:has-text("Add current city")',
+                        'a:has-text("Add current city")',
+                        'div[role="button"]:has-text("Edit current city")',
+                        'span:has-text("Edit current city")',
+                        'div[role="button"]:has-text("Add hometown")',
+                        'span:has-text("Add hometown")',
+                        'div[role="button"]:has-text("Add a city")',
+                        'span:has-text("Add a city")',
+                        'div[role="button"]:has-text("Add city")',
+                        'span:has-text("Add city")',
+                        '[aria-label*="Add current city" i]',
+                        '[aria-label*="Edit current city" i]',
+                        '[aria-label*="Add hometown" i]',
+                        '[aria-label*="Add a city" i]',
+                    ]
 
-                # ── 4. Hometown ───────────────────────────────────────────────
-                if hometown:
-                    await _goto_dir("about_places")
-                    await _click_edit_and_fill(
-                        trigger_selectors=[
-                            'div[role="button"]:has-text("Edit")',
-                            'span:has-text("Add hometown")',
-                            'span:has-text("Edit hometown")',
-                            '[aria-label*="hometown" i]',
-                        ],
-                        input_selectors=[
-                            'input[type="text"]',
-                            'input[aria-label*="hometown" i]',
-                            'div[contenteditable="true"]',
-                        ],
-                        value=hometown,
-                        label="Hometown",
-                    )
-                    await update_task(task_id, completed_steps=4, progress=66)
+                    city_btn = None
+                    for sel in city_btn_selectors:
+                        try:
+                            el = page.locator(sel).first
+                            if await el.count() > 0 and await el.is_visible():
+                                city_btn = el
+                                print(f"[profile_updater] Found city button: {sel}")
+                                break
+                        except Exception:
+                            pass
 
-                # ── 5. Work / School (best-effort) ────────────────────────────
-                if workplace or job_title:
-                    await _goto_dir("about_work_and_education")
-                    work_val = " – ".join(filter(None, [job_title, workplace]))
-                    await _click_edit_and_fill(
-                        trigger_selectors=[
-                            'div[role="button"]:has-text("Edit")',
-                            'span:has-text("Add a workplace")',
-                            'span:has-text("Edit workplace")',
-                        ],
-                        input_selectors=['input[type="text"]', 'div[contenteditable="true"]'],
-                        value=work_val,
-                        label="Workplace",
-                    )
-                    await update_task(task_id, completed_steps=5, progress=83)
+                    if city_btn is not None:
+                        await city_btn.click()
+                        await asyncio.sleep(1)
+                        city_inputs = page.locator('input[aria-label*="city" i], input[placeholder*="city" i], input[placeholder*="City" i], input[type="text"]')
+                        count = await city_inputs.count()
+                        city_input = None
+                        for i in range(count):
+                            item = city_inputs.nth(i)
+                            if await item.is_visible():
+                                city_input = item
+                                break
 
-                if school:
-                    await _goto_dir("about_work_and_education")
-                    await _click_edit_and_fill(
-                        trigger_selectors=[
-                            'div[role="button"]:has-text("Edit")',
-                            'span:has-text("Add a school")',
-                            'span:has-text("Edit school")',
-                        ],
-                        input_selectors=['input[type="text"]', 'div[contenteditable="true"]'],
-                        value=school,
-                        label="School",
-                    )
+                        if city_input is not None:
+                            await city_input.focus()
+                            await city_input.fill("")
+                            await city_input.fill(location)
+                            await asyncio.sleep(1.5)
 
-                # ── 6. Profile / Cover photos (URL download + upload is out of scope here)
-                if profile_pic_url or cover_pic_url:
-                    errors.append("Profile/cover picture upload from URL not implemented in this version")
+                            option = page.locator('div[role="listbox"] [role="option"], ul[role="listbox"] li, [role="option"]').first
+                            if await option.count() > 0 and await option.is_visible():
+                                await option.click()
+                                await asyncio.sleep(1)
+                            await asyncio.sleep(0.5)
+                            save = page.locator('div[role="button"]:has-text("Save"), button:has-text("Save")').first
+                            if await save.count() > 0:
+                                await save.click()
+                                updates_done += 1
+                                print(f"[profile_updater] Location saved")
+                    else:
+                        errors.append("City/location button not found")
 
-                await update_task(task_id, completed_steps=6, progress=100)
+                await update_task(task_id, completed_steps=3, progress=100)
+
+                await write_log(
+                    "profile_update",
+                    task_id=task_id,
+                    account_id=account_id,
+                    details={"bio": bool(bio), "name": bool(name), "location": bool(location), "updates_done": updates_done},
+                )
+                print(f"[profile_updater] Done. updates_done={updates_done} errors={errors}")
 
             except Exception as e:
-                errors.append(str(e))
-                print(f"[profile_updater] Unexpected error: {e}")
+                print(f"[profile_updater] EXCEPTION: {e}")
+                await write_log(
+                    "profile_update",
+                    task_id=task_id,
+                    account_id=account_id,
+                    status="failed",
+                    error=str(e),
+                )
 
-            _touch_account(account_id)
-            _set_account_status(account_id, "idle")
+        _touch_account(account_id)
+        _set_account_status(account_id, "idle")
 
-            status = "completed" if updates_done > 0 else "failed"
-            error_msg = "; ".join(errors) if errors else None
+        if updates_done == 0 and errors:
             await update_task(
                 task_id,
-                status=status,
+                status="failed",
                 finished_at=True,
-                error=error_msg,
+                error=f"No updates applied. Issues: {'; '.join(errors)}",
+            )
+        else:
+            await update_task(
+                task_id,
+                status="completed",
+                finished_at=True,
                 result={"updates_done": updates_done, "errors": errors},
             )
 
     run_background_task(_run(), task_id=task_id)
     return task_id
+
+
+async def get_clicks_on_marketplace(
+    account_id: str,
+    listing_ids: Optional[list[str]],
+) -> dict:
+    """Fetch click/view counts for listings from FB Marketplace seller dashboard."""
+    account = _get_account(account_id)
+    db = get_supabase()
+
+    if listing_ids:
+        result = db.table("listings").select("*").in_("id", listing_ids).execute()
+    else:
+        result = (
+            db.table("listings")
+            .select("*")
+            .eq("account_id", account_id)
+            .eq("status", "published")
+            .limit(50)
+            .execute()
+        )
+
+    listings = result.data
+    click_data = []
+
+    async with _browser_manager.new_session(
+        proxy=account.get("proxy"),
+        cookies_json=account.get("cookies"),
+    ) as session:
+        logged_in = await _do_login(session, account)
+        if not logged_in:
+            raise ValueError("Login failed")
+
+        cookies = await session.save_cookies()
+        _save_cookies(account_id, cookies)
+        page = session.page
+
+        for listing in listings:
+            fb_id = listing.get("fb_listing_id")
+            views = 0
+            if fb_id:
+                try:
+                    await page.goto(
+                        f"https://www.facebook.com/marketplace/item/{fb_id}",
+                        timeout=15000,
+                    )
+                    await page.wait_for_load_state("domcontentloaded")
+                    view_el = page.locator('span:has-text("view"), span:has-text("people")')
+                    if await view_el.count() > 0:
+                        text = await view_el.first.inner_text()
+                        import re
+                        nums = re.findall(r"\d+", text.replace(",", ""))
+                        if nums:
+                            views = int(nums[0])
+                except Exception:
+                    pass
+
+            click_data.append(
+                {
+                    "listing_id": listing["id"],
+                    "fb_listing_id": fb_id,
+                    "title": listing["title"],
+                    "views": views,
+                }
+            )
+            await asyncio.sleep(random.uniform(2, 5))
+
+    _touch_account(account_id)
+    return {"account_id": account_id, "listings": click_data}
+
 
 async def open_fb_accounts(
     account_ids: list[str],

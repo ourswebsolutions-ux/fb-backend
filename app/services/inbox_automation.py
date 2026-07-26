@@ -584,6 +584,220 @@ async def _click_conversation_row(
     return False
 
 
+async def _snapshot_conversation_state(page) -> dict:
+    header = ""
+    message_count = 0
+    try:
+        header = await _extract_conversation_header_text(page)
+    except Exception:
+        pass
+    try:
+        message_count = await page.locator(
+            '[role="main"] div[dir="auto"], '
+            '[role="main"] [role="row"], '
+            '[role="main"] [role="article"], '
+            '[role="main"] [role="gridcell"]'
+        ).count()
+    except Exception:
+        message_count = 0
+    return {"header": header, "message_count": message_count}
+
+
+async def _verify_conversation_opened_after_click(
+    page,
+    previous_state: dict,
+    thread_id: str,
+    timeout_ms: int = 5000,
+) -> bool:
+    attempts = max(2, timeout_ms // 800)
+    for attempt in range(attempts):
+        try:
+            current_header = await _extract_conversation_header_text(page)
+            current_count = await page.locator(
+                '[role="main"] div[dir="auto"], '
+                '[role="main"] [role="row"], '
+                '[role="main"] [role="article"], '
+                '[role="main"] [role="gridcell"]'
+            ).count()
+
+            active_rows = page.locator('[aria-selected="true"], [aria-current="true"], .selected, .active')
+            row_active = False
+            for i in range(await active_rows.count()):
+                try:
+                    item = active_rows.nth(i)
+                    href = (await item.get_attribute('href')) or ''
+                    data_thread_id = (await item.get_attribute('data-thread-id')) or ''
+                    if thread_id in href or data_thread_id == thread_id:
+                        row_active = True
+                        break
+                except Exception:
+                    continue
+
+            url_match = thread_id in page.url
+            header_changed = bool(current_header and current_header != previous_state.get('header', ''))
+            message_list_loaded = current_count > previous_state.get('message_count', 0)
+
+            print(
+                f"[Reply] Pane verify attempt {attempt + 1}: url_match={url_match} "
+                f"row_active={row_active} header_changed={header_changed} "
+                f"current_count={current_count} prev_count={previous_state.get('message_count', 0)}"
+            )
+
+            if row_active or url_match or header_changed or message_list_loaded:
+                return True
+        except Exception as e:
+            print(f"[Reply] Pane verify attempt {attempt + 1} error: {e}")
+
+        await asyncio.sleep(0.8)
+
+    print(f"[Reply] Conversation pane did not change for thread_id={thread_id}")
+    return False
+
+
+async def _open_marketplace_thread_by_thread_id(
+    page,
+    thread_id: str,
+    row_index: Optional[int] = None,
+    tab_name: str = "Selling",
+    strict_activation: bool = False,
+) -> bool:
+    """Open a Marketplace conversation row by thread_id using the same discovery logic as inbox reading."""
+    if not thread_id or not thread_id.isdigit() or len(thread_id) < 8:
+        return False
+
+    await _wait_for_react_hydration(page, timeout_ms=8000)
+
+    row_selectors = [
+        '[role="main"] [role="button"]',
+        'a[href*="/marketplace/inbox/t/"]',
+        'a[href*="/marketplace/t/"]',
+        'a[href*="/messages/t/"]',
+        'a[href*="/t/"]',
+        '[role="main"] [role="row"]',
+        '[role="main"] [role="listitem"]',
+        '[role="main"] [role="link"]',
+    ]
+    combined_selector = ", ".join(row_selectors)
+
+    for wait_attempt in range(5):
+        cand_count = await page.locator(combined_selector).count()
+        if cand_count > 0:
+            break
+        print(f"[Reply] [{tab_name}] Waiting for conversation rows to hydrate (attempt {wait_attempt + 1}/5)")
+        await asyncio.sleep(1.5)
+
+    cand_count = await page.locator(combined_selector).count()
+    print(f"[Reply] [{tab_name}] Searching {cand_count} candidate rows for thread_id={thread_id}")
+
+    strict_state = await _snapshot_conversation_state(page)
+
+    async def verify_opened() -> bool:
+        return await _verify_conversation_opened_after_click(page, strict_state, thread_id)
+
+    async def attempt_row_click(row) -> bool:
+        clicked = await _click_conversation_row(page, row, expected_thread_id=thread_id)
+        if not clicked:
+            return False
+        return await verify_opened()
+
+    for idx in range(cand_count):
+        try:
+            row = page.locator(combined_selector).nth(idx)
+            if await row.count() == 0:
+                continue
+
+            try:
+                connected = await row.evaluate("node => node.isConnected")
+                if not connected:
+                    continue
+            except Exception:
+                pass
+
+            try:
+                await row.scroll_into_view_if_needed(timeout=3000)
+            except Exception:
+                pass
+
+            aria = (await row.get_attribute('aria-label') or '').strip().lower()
+            text = (await row.inner_text() or '').strip().lower()
+            if 'see all in messenger' in aria or 'see all in messenger' in text:
+                continue
+
+            href = (await row.get_attribute('href')) or ''
+            if not href:
+                child_link = row.locator('a[href]').nth(0)
+                if await child_link.count() > 0:
+                    href = (await child_link.get_attribute('href')) or ''
+
+            candidate_id = _extract_thread_id(href)
+            if not candidate_id:
+                nested_links = row.locator('a[href*="/t/"], a[href*="thread_id="], a[href*="/messages/"]')
+                for nested_idx in range(await nested_links.count()):
+                    candidate_id = _extract_thread_id(await nested_links.nth(nested_idx).get_attribute('href') or '')
+                    if candidate_id:
+                        break
+
+            if not candidate_id:
+                data_thread_id = (await row.get_attribute('data-thread-id')) or ''
+                if data_thread_id.isdigit():
+                    candidate_id = data_thread_id
+
+            if candidate_id != thread_id:
+                continue
+
+            print(f"[Reply] [{tab_name}] Found matching row idx={idx} thread_id={thread_id}")
+
+            if await attempt_row_click(row):
+                return True
+
+            print(f"[Reply] [{tab_name}] Initial click on matching row idx={idx} did not confirm open, retrying with hover/nested click")
+            try:
+                await row.hover()
+                await asyncio.sleep(0.2)
+                if await attempt_row_click(row):
+                    return True
+            except Exception as hover_err:
+                print(f"[Reply] [{tab_name}] Hover attempt error: {hover_err}")
+
+            try:
+                nested_clickables = row.locator('a[href], button, [role="button"], [role="link"]')
+                if await nested_clickables.count() > 0:
+                    nested = nested_clickables.first
+                    if await attempt_row_click(nested):
+                        return True
+            except Exception as nested_err:
+                print(f"[Reply] [{tab_name}] Nested clickable attempt error: {nested_err}")
+
+            try:
+                await row.click(force=True)
+                if await verify_opened():
+                    return True
+            except Exception as force_err:
+                print(f"[Reply] [{tab_name}] Force click attempt error: {force_err}")
+
+            try:
+                await row.evaluate("el => el.click()")
+                if await verify_opened():
+                    return True
+            except Exception as js_err:
+                print(f"[Reply] [{tab_name}] JS click attempt error: {js_err}")
+
+            print(f"[Reply] [{tab_name}] Row idx={idx} did not open thread_id={thread_id}")
+        except Exception as row_err:
+            print(f"[Reply] [{tab_name}] Candidate row {idx} scan failed: {row_err}")
+            continue
+
+    if row_index is not None:
+        print(f"[Reply] [{tab_name}] Falling back to saved row index {row_index} for thread_id={thread_id}")
+        row = page.locator(combined_selector).nth(row_index)
+        if await attempt_row_click(row):
+            return True
+        return await _click_conversation_row(page, combined_selector, index=row_index, expected_thread_id=thread_id)
+
+    print(f"[Reply] [{tab_name}] No matching conversation row found for thread_id={thread_id}")
+    return False
+
+
 async def _collect_marketplace_threads(page, max_threads: int, tab_name: str = "") -> list[dict]:
     """Scroll the inbox list and collect unique Marketplace conversation threads using live Playwright locators."""
     await _wait_for_react_hydration(page, timeout_ms=8000)
@@ -643,6 +857,49 @@ async def _collect_marketplace_threads(page, max_threads: int, tab_name: str = "
                     await el.scroll_into_view_if_needed(timeout=3000)
                 except Exception:
                     pass
+
+                # Pre-filter: prefer only UNREAD / unseen conversation rows to avoid
+                # opening already-read threads. Use a multi-strategy DOM check that
+                # looks for badges, aria-labels, bold text, or common data-testid markers.
+                try:
+                    unread_indicator = await el.evaluate("""(el) => {
+                        try {
+                            if (el.querySelector('[aria-label*="unread" i]')) return true;
+                            if (el.querySelector('[data-testid*="unread" i]')) return true;
+                            if (el.querySelector('[aria-label*="unseen" i]')) return true;
+
+                            // numeric unread badges (e.g. <span>2</span>)
+                            const spans = Array.from(el.querySelectorAll('span,div'));
+                            for (const s of spans) {
+                                const t = (s.innerText||'').trim();
+                                if (/^\d+$/.test(t) && s.offsetWidth > 0 && s.offsetHeight > 0) return true;
+                            }
+
+                            // explicit bold nodes often indicate unread preview
+                            if (el.querySelector('strong, b')) return true;
+
+                            // computed style heuristic: first visible text node boldness
+                            const textEl = el.querySelector('div,span');
+                            if (textEl) {
+                                const fw = window.getComputedStyle(textEl).getPropertyValue('font-weight') || '';
+                                if (/^\d+$/.test(fw) && parseInt(fw) >= 600) return true;
+                                if ((fw || '').toLowerCase() === 'bold') return true;
+                            }
+
+                            // final fallback: aria-label on the row itself
+                            const al = el.getAttribute && (el.getAttribute('aria-label') || '');
+                            if (/unread|unseen/i.test(al)) return true;
+                        } catch (e) {
+                            return false;
+                        }
+                        return false;
+                    }""")
+                except Exception:
+                    unread_indicator = False
+
+                if not unread_indicator:
+                    # Skip rows that show no unread indicator
+                    continue
 
                 # Read row text & extract sender_name first
                 row_text = ""
@@ -789,24 +1046,108 @@ async def _extract_message_bubbles(page) -> list[str]:
     return texts
 
 
-async def _get_thread_sender_name(page) -> str:
-    """Extract sender name from the header of an open conversation thread."""
-    for h_loc in [
-        page.locator('[role="main"] h1'),
-        page.locator('[role="main"] h2'),
-        page.get_by_role("heading"),
-        page.locator('h1[dir="auto"]'),
-        page.locator('h2[dir="auto"]'),
-    ]:
+async def _is_valid_sender_name(candidate: str, preview_text: str = "") -> bool:
+    if not candidate:
+        return False
+    txt = candidate.strip()
+    if not txt:
+        return False
+    low = txt.lower()
+    # Reject obvious invalid values
+    invalids = {
+        "marketplace", "messenger", "inbox", "facebook",
+        "selling", "buying", "chats", "notifications",
+        "listing", "product", "your profile", "your listing",
+    }
+    if low in invalids:
+        return False
+    # Reject values that equal the preview/listing text
+    if preview_text:
+        p = preview_text.strip().lower()
+        if p and (low == p or low in p or p in low):
+            return False
+    # Reject strings that look like navigation labels or long squashed titles
+    if len(txt) > 120:
+        return False
+    # Reject empty-like or generic tokens
+    if re.match(r'^[\W_]+$', txt):
+        return False
+    return True
+
+
+async def _get_thread_sender_name(page, preview_text: str = "") -> str:
+    """Extract the conversation participant's display name from the open thread.
+
+    Tries a prioritized list of selectors and heuristics, validates candidates,
+    and falls back to profile-link text when available. Returns empty string on failure.
+    """
+    selectors = [
+        '[role="main"] [data-testid="conversation-title"]',
+        '[role="main"] [data-testid="conversation-name"]',
+        '[role="main"] header h1',
+        '[role="main"] header h2',
+        '[role="main"] h1',
+        '[role="main"] h2',
+        '[role="main"] [role="heading"]',
+        'h1[dir="auto"]',
+        'h2[dir="auto"]',
+    ]
+
+    # Try multiple times in case the header loads after messages
+    for attempt in range(5):
+        for sel in selectors:
+            try:
+                loc = page.locator(sel)
+                if await loc.count() == 0:
+                    continue
+                # try each matching element
+                count = await loc.count()
+                for i in range(count):
+                    try:
+                        item = loc.nth(i)
+                        txt = (await item.inner_text()).strip()
+                        # Heuristic: sometimes heading contains 'Name · Listing Title'
+                        if '·' in txt:
+                            candidate = txt.split('·', 1)[0].strip()
+                        elif ' - ' in txt:
+                            candidate = txt.split(' - ', 1)[0].strip()
+                        else:
+                            candidate = txt
+
+                        if await _is_valid_sender_name(candidate, preview_text):
+                            return candidate
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+        # Fallback: look for a profile link text inside the conversation header
         try:
-            count = await h_loc.count()
-            for i in range(count):
-                item = h_loc.nth(i)
-                txt = (await item.inner_text()).strip()
-                if txt and len(txt) < 120 and txt.lower() not in {"marketplace", "inbox", "selling", "buying", "chats"}:
+            profile_links = page.locator('[role="main"] a[href*="/profile.php"], [role="main"] a[href*="/people/"]')
+            if await profile_links.count() > 0:
+                txt = (await profile_links.first.inner_text()).strip()
+                if await _is_valid_sender_name(txt, preview_text):
                     return txt
         except Exception:
             pass
+
+        # Fallback: headings rendered as link text or aria-labels on buttons
+        try:
+            btns = page.locator('[role="main"] [aria-label], [role="main"] button[aria-label]')
+            c = await btns.count()
+            for i in range(min(c, 12)):
+                try:
+                    a = (await btns.nth(i).get_attribute('aria-label') or '').strip()
+                    if a and await _is_valid_sender_name(a, preview_text):
+                        return a
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Wait briefly and retry if nothing valid found yet
+        await asyncio.sleep(0.6)
+
     return ""
 
 
@@ -818,7 +1159,7 @@ async def _get_latest_incoming_message(
     fallback_preview: str = "",
 ) -> tuple[str, str]:
     """Return (sender_name, message_text) for the latest buyer/seller message."""
-    sender_name = await _get_thread_sender_name(page)
+    sender_name = await _get_thread_sender_name(page, fallback_preview)
     bubbles = await _extract_message_bubbles(page)
 
     if not bubbles and fallback_preview:
@@ -1178,21 +1519,16 @@ async def read_inbox_messages(
                         print(f"[inbox_read] [{tab_name}] Thread {i + 1}/{len(threads)} "
                               f"id={thread_id} sender={sender_name!r}")
 
-                        row_selectors = [
-                            '[role="main"] [role="button"]',
-                            'a[href*="/marketplace/inbox/t/"]',
-                            'a[href*="/marketplace/t/"]',
-                            'a[href*="/messages/t/"]',
-                            'a[href*="/t/"]',
-                            '[role="main"] [role="row"]',
-                            '[role="main"] [role="listitem"]',
-                            '[role="main"] [role="link"]',
-                        ]
-                        combined_sel = ", ".join(row_selectors)
                         row_idx = thread.get("row_index", i)
 
-                        # SPA UI thread selection: click conversation row in UI instead of page.goto()
-                        await _click_conversation_row(page, combined_sel, index=row_idx, expected_thread_id=thread_id)
+                        if not await _open_marketplace_thread_by_thread_id(
+                            page,
+                            thread_id,
+                            row_index=row_idx,
+                            tab_name=tab_name,
+                        ):
+                            print(f"[inbox_read] [{tab_name}] Could not open thread_id={thread_id}")
+                            continue
                         await _wait_for_conversation_pane_loaded(page, thread_id=thread_id)
 
                         sender_name, last_msg_text = await _get_latest_incoming_message(
@@ -1412,95 +1748,138 @@ async def _send_reply_via_browser(
     """Navigate to the conversation thread and send the reply text."""
     page = session.page
     try:
+        print(f"[Reply] Request received for message_id={message.get('id')} thread_id={message.get('thread_id')}")
         thread_id = message.get("thread_id")
-        opened = False
-
-        if thread_id and thread_id.isdigit() and len(thread_id) > 8:
-            try:
-                await page.goto(_thread_url(thread_id), timeout=15000)
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                await session.human_delay(1500, 3000)
-                opened = "marketplace" in page.url or "messages" in page.url
-            except Exception as goto_err:
-                print(f"[inbox_auto_reply] Direct URL navigation failed ({goto_err}), falling back to UI search...")
-                opened = False
-
-        if not opened:
-            if not await _goto_marketplace_inbox(page):
-                return False
-            await session.human_delay(1000, 2000)
-
-            sender_name = message.get("sender_name", "")
-            for tab_name in INBOX_TABS:
-                await _click_inbox_tab(page, tab_name)
-                await session.human_delay(800, 1500)
-
-                if sender_name:
-                    search_box = page.locator(
-                        'input[placeholder*="Search" i], input[aria-label*="Search" i]'
-                    )
-                    if await search_box.count() > 0:
-                        await search_box.first.fill(sender_name)
-                        await session.human_delay(1000, 2000)
-
-                    thread_item = page.locator(
-                        f'{THREAD_LINK_SELECTOR}, '
-                        f'[role="listitem"]:has-text("{sender_name}")'
-                    )
-                    if await thread_item.count() > 0:
-                        await thread_item.first.click()
-                        await session.human_delay(1500, 3000)
-                        opened = True
-                        break
-
-                threads = await _collect_marketplace_threads(page, 50)
-                for thread in threads:
-                    if sender_name and thread.get("sender_name") == sender_name:
-                        await page.goto(_thread_url(thread["thread_id"]), timeout=20000)
-                        await page.wait_for_load_state("domcontentloaded", timeout=15000)
-                        await session.human_delay(1500, 3000)
-                        opened = True
-                        break
-                if opened:
-                    break
-
-        if not opened:
+        if not thread_id or not thread_id.isdigit() or len(thread_id) <= 8:
+            print(f"[Reply] Invalid thread_id={thread_id}")
             return False
 
-        reply_input = page.locator(
+        if not await _goto_marketplace_inbox(page, tab="Selling"):
+            print("[Reply] Could not load marketplace inbox")
+            return False
+        await session.human_delay(1000, 2000)
+
+        if not await _open_marketplace_thread_by_thread_id(
+            page,
+            thread_id,
+            tab_name="Selling",
+            strict_activation=True,
+        ):
+            print(f"[Reply] Could not locate or activate conversation row for thread_id={thread_id}")
+            return False
+
+        print(f"[Reply] Conversation pane open confirmed for thread_id={thread_id}")
+        await _wait_for_conversation_pane_loaded(page, thread_id=thread_id)
+
+        main_loc = page.locator('[role="main"]')
+
+        # Locate composer within conversation pane context to avoid search/filter inputs
+        composer_selector = (
             'div[contenteditable="true"][data-lexical-editor="true"], '
             'div[contenteditable="true"][role="textbox"], '
             'div[role="textbox"], '
-            'textarea[placeholder*="Message" i], '
-            'input[placeholder*="Message" i]'
+            'textarea[placeholder*="Message" i]'
         )
+        composer = main_loc.locator(composer_selector)
+        # Fallback to global if none found in main
+        if await composer.count() == 0:
+            composer = page.locator(composer_selector)
 
-        if await reply_input.count() == 0:
+        if await composer.count() == 0:
+            print("[Reply] Composer input not found")
             return False
 
-        await reply_input.first.click()
-        await session.human_delay(300, 800)
-        await reply_input.first.fill(reply_text)
+        # Find the first visible, enabled composer
+        comp = None
+        for i in range(await composer.count()):
+            c = composer.nth(i)
+            try:
+                if not await c.is_visible():
+                    continue
+                # ensure not read-only/disabled
+                disabled = await c.get_attribute('disabled')
+                if disabled:
+                    continue
+                comp = c
+                break
+            except Exception:
+                continue
 
-        await session.human_delay(500, 1000)
+        if comp is None:
+            print("[Reply] No usable composer found")
+            return False
 
-        send_btn = page.locator(
-            'div[role="button"][aria-label*="Send" i], '
-            'button[aria-label*="Send" i], '
-            'div[role="button"]:has-text("Send")'
+        print("[Reply] Input field located — focusing and typing message")
+        try:
+            await comp.click()
+        except Exception:
+            try:
+                await comp.evaluate('el => el.focus()')
+            except Exception:
+                pass
+
+        await session.human_delay(200, 400)
+
+        # Clear existing text if any, then type — use keyboard for contenteditable
+        try:
+            # Select all and delete
+            await page.keyboard.press('Control+A')
+            await page.keyboard.press('Backspace')
+        except Exception:
+            pass
+
+        # Type the reply text (keyboard.type is more reliable for contenteditable)
+        try:
+            await page.keyboard.type(reply_text, delay=30)
+        except Exception:
+            try:
+                await comp.fill(reply_text)
+            except Exception:
+                # last resort: set innerText
+                try:
+                    await comp.evaluate("(el, text) => { el.innerText = text; }", reply_text)
+                except Exception as e:
+                    print(f"[Reply] Typing failed: {e}")
+                    return False
+
+        await session.human_delay(300, 600)
+
+        # Attempt to find an explicit Send button within main pane first
+        send_btn = main_loc.locator(
+            'div[role="button"][aria-label*="Send" i], button[aria-label*="Send" i], div[role="button"]:has-text("Send")'
         )
-        if await send_btn.count() > 0:
-            await send_btn.first.click()
-        else:
-            await page.keyboard.press("Enter")
+        try:
+            if await send_btn.count() > 0 and await send_btn.first.is_visible():
+                print("[Reply] Clicking Send button")
+                await send_btn.first.click()
+            else:
+                print("[Reply] Falling back to Enter key")
+                await page.keyboard.press("Enter")
+        except Exception as send_err:
+            print(f"[Reply] Send action failed: {send_err} — trying Enter key")
+            try:
+                await page.keyboard.press("Enter")
+            except Exception as e:
+                print(f"[Reply] Enter key failed: {e}")
+                return False
 
-        await session.human_delay(1500, 2500)
+        await session.human_delay(800, 1600)
 
-        # Verify the reply appears in the thread
-        bubbles = await _extract_message_bubbles(page)
-        return reply_text.strip() in bubbles
+        # Verify the reply appears in the thread with retries
+        for verify_attempt in range(4):
+            try:
+                bubbles = await _extract_message_bubbles(page)
+                if reply_text.strip() in bubbles:
+                    print("[Reply] Reply verified in conversation")
+                    return True
+            except Exception as ve:
+                print(f"[Reply] Verification attempt error: {ve}")
+            await asyncio.sleep(0.8 + verify_attempt * 0.5)
+
+        print("[Reply] Reply not found after send — assuming failure")
+        return False
     except Exception as e:
-        print(f"[inbox_auto_reply] Send failed: {e}")
+        print(f"[Reply] Send failed: {e}")
         return False
 
 
@@ -1550,4 +1929,7 @@ async def send_manual_reply(message_id: str, reply_text: str) -> dict:
         except Exception as b_err:
             print(f"[send_manual_reply] WebSocket broadcast error: {b_err}")
 
-    return {"message_id": message_id, "reply_status": status}
+    if sent:
+        return {"success": True, "message": "Reply sent successfully", "reply_status": status, "message_id": message_id}
+    else:
+        return {"success": False, "message": "Failed to send reply. See server logs for details", "reply_status": status, "message_id": message_id}
