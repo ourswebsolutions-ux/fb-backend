@@ -248,7 +248,7 @@ async def _goto_marketplace_inbox(page, tab: Optional[str] = None) -> bool:
     for attempt, target_url in enumerate(urls_to_try):
         try:
             print(f"[inbox_read] Attempt {attempt + 1}: Navigating to {target_url}...")
-            await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             await _wait_for_react_hydration(page, timeout_ms=15000)
         except Exception as nav_err:
             print(f"[inbox_read] Nav error attempt {attempt + 1}: {nav_err}")
@@ -260,7 +260,7 @@ async def _goto_marketplace_inbox(page, tab: Optional[str] = None) -> bool:
         if "/marketplace/you/" in current_url:
             print(f"[inbox_read] Attempt {attempt + 1}: Redirected to Seller Dashboard (/marketplace/you/). Forcing navigation to Inbox root...")
             try:
-                await page.goto(f"https://{current_host}/marketplace/inbox/", wait_until="domcontentloaded", timeout=30000)
+                await page.goto(f"https://{current_host}/marketplace/inbox/", wait_until="domcontentloaded", timeout=60000)
                 await _wait_for_react_hydration(page, timeout_ms=15000)
                 current_url = page.url
             except Exception as retry_err:

@@ -37,6 +37,75 @@ from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 FB_BASE = "https://www.facebook.com"
 
 
+def _sanitize_cookie(cookie: object) -> dict:
+    """Normalize cookie dictionaries to the shape Playwright accepts."""
+    if not isinstance(cookie, dict):
+        return {}
+
+    sanitized = dict(cookie)
+
+    same_site = sanitized.get("sameSite")
+    if isinstance(same_site, str):
+        normalized_same_site = same_site.strip().lower()
+        if normalized_same_site in {"strict", "lax", "none"}:
+            sanitized["sameSite"] = normalized_same_site.capitalize()
+        elif normalized_same_site in {"unspecified", "", "no_restriction", "default"}:
+            sanitized["sameSite"] = "None"
+        else:
+            sanitized["sameSite"] = "None"
+    elif same_site is None:
+        sanitized["sameSite"] = "None"
+
+    if "secure" in sanitized and not isinstance(sanitized["secure"], bool):
+        sanitized["secure"] = bool(sanitized["secure"])
+
+    if "httpOnly" in sanitized and not isinstance(sanitized["httpOnly"], bool):
+        sanitized["httpOnly"] = bool(sanitized["httpOnly"])
+
+    return sanitized
+
+
+def normalize_session_payload(payload: object) -> dict:
+    """Normalize uploaded Playwright or exported browser session JSON into a dict with cookies/origins."""
+    if isinstance(payload, list):
+        if not payload:
+            raise ValueError("Session payload must contain cookies or origins")
+        sanitized_cookies = [_sanitize_cookie(cookie) for cookie in payload if isinstance(cookie, dict)]
+        if not sanitized_cookies:
+            raise ValueError("Session payload must contain cookies or origins")
+        return {"cookies": sanitized_cookies}
+
+    if not isinstance(payload, dict):
+        raise ValueError("Session payload must be a JSON object")
+
+    if "cookies" in payload or "origins" in payload:
+        normalized = dict(payload)
+        if "cookies" in normalized and not isinstance(normalized["cookies"], list):
+            raise ValueError("Session cookies must be an array")
+        if "origins" in normalized and not isinstance(normalized["origins"], list):
+            raise ValueError("Session origins must be an array")
+        if "cookies" in normalized:
+            normalized["cookies"] = [_sanitize_cookie(cookie) for cookie in normalized["cookies"] if isinstance(cookie, dict)]
+        return normalized
+
+    browser_session = payload.get("browserSession")
+    if isinstance(browser_session, dict):
+        normalized = {}
+        nested_cookies = browser_session.get("cookies")
+        if nested_cookies is not None:
+            normalized["cookies"] = nested_cookies if isinstance(nested_cookies, list) else [nested_cookies]
+        nested_origins = browser_session.get("origins")
+        if nested_origins is not None:
+            normalized["origins"] = nested_origins if isinstance(nested_origins, list) else [nested_origins]
+        if "cookies" in normalized or "origins" in normalized:
+            return normalized
+
+    if isinstance(payload.get("cookies"), list) or isinstance(payload.get("origins"), list):
+        return payload
+
+    raise ValueError("Session payload must contain cookies or origins")
+
+
 # ── TOTP / 2FA helpers ────────────────────────────────────────────────────────
 
 def generate_totp(secret: str) -> str:
@@ -86,6 +155,35 @@ def extract_2fa_secret(notes: Optional[str]) -> Optional[str]:
 #   • If no cookies → fall back to BrowserManager.login() (headless credential login).
 #   • The Verify API (accounts.py /verify) is the ONLY place that creates a new
 #     Facebook login session and saves fresh cookies to the database.
+
+async def restore_session_payload(session: "BrowserSession", payload: object) -> None:
+    """Restore cookies and localStorage from a Playwright storageState or exported browser-session payload."""
+    normalized = normalize_session_payload(payload)
+    cookies = normalized.get("cookies") or []
+    if cookies:
+        await session.context.add_cookies(cookies)
+
+    origins = normalized.get("origins") or []
+    for item in origins:
+        origin = item.get("origin") if isinstance(item, dict) else None
+        local_storage = item.get("localStorage") if isinstance(item, dict) else None
+        if not origin or not isinstance(local_storage, list):
+            continue
+        try:
+            await session.page.goto(origin, wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        for entry in local_storage:
+            if isinstance(entry, dict) and entry.get("name") is not None:
+                try:
+                    await session.page.evaluate(
+                        "(name, value) => localStorage.setItem(name, value)",
+                        entry.get("name"),
+                        entry.get("value"),
+                    )
+                except Exception:
+                    continue
+
 
 async def do_login(
     session: "BrowserSession",
@@ -236,7 +334,7 @@ class BrowserSession:
             # Not on Facebook, navigate to homepage to check
             print(f"[is_logged_in] Not on FB, navigating to {FB_BASE} ...")
             try:
-                await self.page.goto(FB_BASE, timeout=30000)
+                await self.page.goto(FB_BASE, timeout=80000)
                 await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
             except Exception as nav_err:
                 print(f"[is_logged_in] Nav error: {nav_err}")

@@ -9,9 +9,10 @@ from datetime import datetime
 class FBAccountCreate(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
-    password: str
+    password: Optional[str] = None
     proxy: Optional[str] = None
     notes: Optional[str] = None
+    session_data: Optional[Any] = None
 
     @property
     def login_identifier(self) -> str:
@@ -39,6 +40,43 @@ class FBAccount(BaseModel):
     last_used_at: Optional[datetime]
     notes: Optional[str]
     created_at: datetime
+
+
+class ImportSessionCreateRequest(BaseModel):
+    display_name: Optional[str] = None
+    facebook_user_id: Optional[str] = None
+    profile_url: Optional[str] = None
+    verification_status: bool = False
+    last_verified_at: Optional[str] = None
+    session: Optional[dict[str, Any]] = None
+
+
+class ImportSessionCreateResponse(BaseModel):
+    id: Optional[str] = None
+    display_name: Optional[str] = None
+    facebook_user_id: Optional[str] = None
+    profile_url: Optional[str] = None
+    verification_status: bool = False
+    last_verified_at: Optional[str] = None
+    status: str = "active"
+    message: str = "Import session account created successfully"
+
+
+class ImportSessionRequest(BaseModel):
+    account_name: Optional[str] = None
+    session_data: Optional[str] = None
+
+
+class ImportSessionResponse(BaseModel):
+    verified: bool
+    success: bool
+    message: str
+    profile: Optional[dict[str, Any]] = None
+
+
+class ImportSessionValidation(BaseModel):
+    required_fields: list[str] = ["session_data"]
+    optional_fields: list[str] = ["account_name"]
 
 
 # ---- Listing ----
@@ -122,6 +160,7 @@ class NewAccountSlowRequest(BaseModel):
     delay_seconds: int = Field(default=30, ge=5, le=300)
     use_ai: bool = False
     product_name: Optional[str] = None
+    description: Optional[str] = None
     category: Optional[str] = None
     condition: str = "used_good"
     price: int = 0

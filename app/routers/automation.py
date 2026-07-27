@@ -54,6 +54,7 @@ async def new_account_slow(body: NewAccountSlowRequest):
         condition=body.condition,
         price=body.price,
         images=body.images,
+        description=getattr(body, 'description', None),
     )
     return {"task_id": task_id, "message": "New account slow listing task started"}
 
