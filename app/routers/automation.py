@@ -3,8 +3,10 @@ import uuid
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from typing import List
+from app.core.deps import get_current_user
+from app.core.database import get_supabase
 from app.models import (
     NewAccountSlowRequest,
     NewAccountSlowV2Request,
@@ -37,8 +39,17 @@ MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB per image
 router = APIRouter()
 
 
+def _verify_account_owner(account_id: str, user_id: str):
+    """Raise 404 if the account does not belong to the current user."""
+    db = get_supabase()
+    result = db.table("fb_accounts").select("id").eq("id", account_id).eq("user_id", user_id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+
 @router.post("/new-account-slow")
-async def new_account_slow(body: NewAccountSlowRequest):
+async def new_account_slow(body: NewAccountSlowRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     if not body.images:
         raise HTTPException(
             status_code=400,
@@ -55,12 +66,14 @@ async def new_account_slow(body: NewAccountSlowRequest):
         price=body.price,
         images=body.images,
         description=getattr(body, 'description', None),
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "New account slow listing task started"}
 
 
 @router.post("/new-account-slow-v2")
-async def new_account_slow_v2(body: NewAccountSlowV2Request):
+async def new_account_slow_v2(body: NewAccountSlowV2Request, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     if not body.images:
         raise HTTPException(
             status_code=400,
@@ -78,12 +91,14 @@ async def new_account_slow_v2(body: NewAccountSlowV2Request):
         images=body.images,
         warmup_before=body.warmup_before,
         warmup_steps=body.warmup_steps,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "New account slow V2 listing task started"}
 
 
 @router.post("/ultra-ai-listings")
-async def ultra_ai_listings(body: UltraAIListingRequest):
+async def ultra_ai_listings(body: UltraAIListingRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     if not body.images:
         raise HTTPException(
             status_code=400,
@@ -98,12 +113,14 @@ async def ultra_ai_listings(body: UltraAIListingRequest):
         price=body.price,
         images=body.images,
         extra_details=body.extra_details,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": f"Ultra AI listings task started (up to {body.listing_count} listings)"}
 
 
 @router.post("/create-drafts")
-async def create_drafts(body: CreateDraftsRequest):
+async def create_drafts(body: CreateDraftsRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     if not body.images:
         raise HTTPException(
             status_code=400,
@@ -119,46 +136,54 @@ async def create_drafts(body: CreateDraftsRequest):
         condition=body.condition,
         images=body.images,
         use_ai=body.use_ai,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Create drafts task started"}
 
 
 @router.post("/renew-listings")
-async def renew_listings(body: RenewListingsRequest):
+async def renew_listings(body: RenewListingsRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.renew_listings(
         account_id=str(body.account_id),
         listing_ids=[str(i) for i in body.listing_ids] if body.listing_ids else None,
         max_renew=body.max_renew,
         delay_seconds=body.delay_seconds,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Renew listings task started"}
 
 
 @router.post("/relist-listings")
-async def relist_listings(body: RelistListingsRequest):
+async def relist_listings(body: RelistListingsRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.relist_listings(
         account_id=str(body.account_id),
         listing_ids=[str(i) for i in body.listing_ids] if body.listing_ids else None,
         max_relist=body.max_relist,
         delay_seconds=body.delay_seconds,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Relist listings task started"}
 
 
 @router.post("/draft-publisher-ai")
-async def draft_publisher_ai(body: DraftPublisherAIRequest):
+async def draft_publisher_ai(body: DraftPublisherAIRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.draft_publisher_ai(
         account_id=str(body.account_id),
         draft_ids=[str(i) for i in body.draft_ids] if body.draft_ids else None,
         max_publish=body.max_publish,
         delay_seconds=body.delay_seconds,
         improve_with_ai=body.improve_with_ai,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Draft publisher with AI task started"}
 
 
 @router.post("/delete-all-listings")
-async def delete_all_listings(body: DeleteAllListingsRequest):
+async def delete_all_listings(body: DeleteAllListingsRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     if not body.confirm:
         raise HTTPException(
             status_code=400,
@@ -167,23 +192,27 @@ async def delete_all_listings(body: DeleteAllListingsRequest):
     task_id = await fb.delete_all_listings(
         account_id=str(body.account_id),
         status_filter=body.status_filter,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Delete all listings task started"}
 
 
 @router.post("/draft-publisher")
-async def draft_publisher(body: DraftPublisherRequest):
+async def draft_publisher(body: DraftPublisherRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.draft_publisher(
         account_id=str(body.account_id),
         draft_ids=[str(i) for i in body.draft_ids] if body.draft_ids else None,
         max_publish=body.max_publish,
         delay_seconds=body.delay_seconds,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Draft publisher task started"}
 
 
 @router.post("/draft-delete")
-async def draft_delete(body: DraftDeleteRequest):
+async def draft_delete(body: DraftDeleteRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     if not body.confirm:
         raise HTTPException(
             status_code=400,
@@ -193,52 +222,62 @@ async def draft_delete(body: DraftDeleteRequest):
         account_id=str(body.account_id),
         draft_ids=[str(i) for i in body.draft_ids] if body.draft_ids else None,
         max_delete=body.max_delete,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Draft delete task started"}
 
 
 @router.post("/publish-listing")
-async def publish_listing(body: PublishListingRequest):
+async def publish_listing(body: PublishListingRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.publish_listing(
         account_id=str(body.account_id),
         listing_id=str(body.listing_id),
         delay_seconds=body.delay_seconds,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Publish listing task started"}
 
 
 @router.post("/delete-listing")
-async def delete_listing(body: DeleteListingRequest):
+async def delete_listing(body: DeleteListingRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.delete_listing(
         account_id=str(body.account_id),
         listing_id=str(body.listing_id),
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Delete listing task started"}
 
 
 @router.post("/ads-multiplier")
-async def ads_multiplier(body: AdsMultiplierRequest):
+async def ads_multiplier(body: AdsMultiplierRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.ads_multiplier(
         account_id=str(body.account_id),
         listing_ids=[str(i) for i in body.listing_ids] if body.listing_ids else None,
         multiplier=body.multiplier,
         delay_seconds=body.delay_seconds,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": f"Ads multiplier task started (x{body.multiplier})"}
 
 
 @router.post("/warmup")
-async def warmup(body: WarmupRequest):
+async def warmup(body: WarmupRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.fb_warmup(
         account_id=str(body.account_id),
         duration_minutes=body.duration_minutes,
         actions_per_minute=body.actions_per_minute,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Account warmup task started"}
 
 
 @router.post("/profile-updater")
-async def profile_updater(body: ProfileUpdaterRequest):
+async def profile_updater(body: ProfileUpdaterRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.fb_profile_updater(
         account_id=str(body.account_id),
         name=body.name,
@@ -250,12 +289,14 @@ async def profile_updater(body: ProfileUpdaterRequest):
         school=body.school,
         profile_pic_url=body.profile_pic_url,
         cover_pic_url=body.cover_pic_url,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": "Profile updater task started"}
 
 
 @router.post("/get-clicks")
-async def get_clicks(body: GetClicksRequest):
+async def get_clicks(body: GetClicksRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     try:
         result = await fb.get_clicks_on_marketplace(
             account_id=str(body.account_id),
@@ -267,7 +308,13 @@ async def get_clicks(body: GetClicksRequest):
 
 
 @router.post("/open-accounts")
-async def open_accounts(body: OpenAccountRequest):
+async def open_accounts(body: OpenAccountRequest, user=Depends(get_current_user)):
+    # Verify all requested accounts belong to this user
+    db = get_supabase()
+    for acc_id in body.account_ids:
+        result = db.table("fb_accounts").select("id").eq("id", acc_id).eq("user_id", user.id).limit(1).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Account {acc_id} not found")
     result = await fb.open_fb_accounts(
         account_ids=[str(i) for i in body.account_ids],
         action=body.action,
@@ -276,7 +323,8 @@ async def open_accounts(body: OpenAccountRequest):
 
 
 @router.post("/listing-automation")
-async def listing_automation(body: ListingAutomationRequest):
+async def listing_automation(body: ListingAutomationRequest, user=Depends(get_current_user)):
+    _verify_account_owner(str(body.account_id), user.id)
     task_id = await fb.listing_automation(
         account_id=str(body.account_id),
         workflow_type=body.workflow_type,
@@ -286,6 +334,7 @@ async def listing_automation(body: ListingAutomationRequest):
         schedule_time=body.schedule_time,
         repeat_interval=body.repeat_interval,
         repeat_until=body.repeat_until,
+        user_id=user.id,
     )
     return {"task_id": task_id, "message": f"Listing automation task started ({body.workflow_type})"}
 
@@ -343,3 +392,75 @@ async def upload_images(files: List[UploadFile] = File(...)):
 
     print(f"[upload_images] {len(saved_paths)} image(s) uploaded successfully")
     return {"paths": saved_paths, "count": len(saved_paths)}
+
+# ── Image upload ──────────────────────────────────────────────────────────────
+
+@router.post("/upload-images")
+async def upload_images(files: List[UploadFile] = File(...)):
+    """
+    Accept multipart image uploads from the frontend.
+    No auth required — images are server-local paths used by Playwright.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="Please upload at least one product image.")
+
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 images per upload.")
+
+    saved_paths: list[str] = []
+
+    for upload in files:
+        content_type = upload.content_type or ""
+        if content_type not in ALLOWED_MIME:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type '{content_type}' for '{upload.filename}'. "
+                       "Only JPEG, PNG, WEBP, and GIF images are accepted.",
+            )
+
+        data = await upload.read()
+        if len(data) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Image '{upload.filename}' exceeds the 15 MB size limit.",
+            )
+
+        ext = Path(upload.filename or "image").suffix or ".jpg"
+        filename = f"{uuid.uuid4().hex}{ext}"
+        dest = UPLOAD_DIR / filename
+
+        with open(dest, "wb") as f:
+            f.write(data)
+
+        saved_paths.append(str(dest.resolve()))
+        print(f"[upload_images] Saved '{upload.filename}' → {dest} ({len(data) // 1024} KB)")
+
+    print(f"[upload_images] {len(saved_paths)} image(s) uploaded successfully")
+    return {"paths": saved_paths, "count": len(saved_paths)}
+
+
+@router.post("/cleanup-uploads")
+async def cleanup_old_uploads():
+    """
+    Manually trigger cleanup of uploaded images older than 7 days.
+    Also runs automatically on every backend startup.
+    """
+    import time
+    cutoff = time.time() - (7 * 24 * 60 * 60)
+    deleted = 0
+    errors = 0
+    for f in UPLOAD_DIR.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+        except Exception:
+            errors += 1
+
+    total = sum(1 for f in UPLOAD_DIR.iterdir() if f.is_file())
+    return {
+        "deleted": deleted,
+        "remaining": total,
+        "errors": errors,
+        "message": f"Deleted {deleted} file(s) older than 7 days. {total} file(s) remaining.",
+    }

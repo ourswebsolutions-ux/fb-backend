@@ -21,7 +21,7 @@ from app.task_runner import create_task, update_task, write_log, run_background_
 MARKETPLACE_CREATE = "https://www.facebook.com/marketplace/create/item"
 MARKETPLACE_LISTINGS = "https://www.facebook.com/marketplace/you/selling"
 
-_browser_manager = BrowserManager(headless=False)
+_browser_manager = BrowserManager(headless=True)
 _ai_service = AIService()
 
 
@@ -1753,10 +1753,12 @@ async def publish_listing(
     account_id: str,
     listing_id: str,
     delay_seconds: int,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "publish_listing",
         {"account_id": account_id, "listing_id": listing_id},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=1, started_at=True)
     _set_account_status(account_id, "active")
@@ -1885,10 +1887,12 @@ async def publish_listing(
 async def delete_listing(
     account_id: str,
     listing_id: str,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "delete_listing",
         {"account_id": account_id, "listing_id": listing_id},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=1, started_at=True)
     _set_account_status(account_id, "active")
@@ -1994,10 +1998,12 @@ async def new_account_slow(
     price: int,
     images: list[str],
     description: Optional[str] = None,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "new_account_slow",
         {"account_id": account_id, "listing_count": listing_count},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=listing_count, started_at=True)
     _set_account_status(account_id, "active")
@@ -2136,12 +2142,14 @@ async def new_account_slow_v2(
     images: list[str],
     warmup_before: bool,
     warmup_steps: int,
+    user_id: str | None = None,
 ) -> str:
     if warmup_before:
         warmup_task_id = await fb_warmup(
             account_id=account_id,
             duration_minutes=warmup_steps,
             actions_per_minute=3,
+            user_id=user_id,
         )
         # Give warmup a head start
         await asyncio.sleep(2)
@@ -2156,6 +2164,7 @@ async def new_account_slow_v2(
         condition=condition,
         price=price,
         images=images,
+        user_id=user_id,
     )
 
 
@@ -2168,11 +2177,13 @@ async def ultra_ai_listings(
     price: int,
     images: list[str],
     extra_details: str,
+    user_id: str | None = None,
 ) -> str:
     """Generates up to 100 AI-powered listings rapidly."""
     task_id = await create_task(
         "ultra_ai_listings",
         {"account_id": account_id, "listing_count": listing_count},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=listing_count, started_at=True)
     _set_account_status(account_id, "active")
@@ -2297,10 +2308,12 @@ async def create_only_drafts(
     condition: str,
     images: list[str],
     use_ai: bool,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "create_only_drafts",
         {"account_id": account_id, "draft_count": draft_count},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=draft_count, started_at=True)
     _set_account_status(account_id, "active")
@@ -2395,10 +2408,12 @@ async def renew_listings(
     listing_ids: Optional[list[str]],
     max_renew: int,
     delay_seconds: int,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "renew_listings",
         {"account_id": account_id, "max_renew": max_renew},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=max_renew, started_at=True)
     _set_account_status(account_id, "active")
@@ -2497,6 +2512,7 @@ async def listing_automation(
     schedule_time: Optional[str] = None,
     repeat_interval: Optional[str] = None,
     repeat_until: Optional[str] = None,
+    user_id: str | None = None,
 ) -> str:
     """Unified listing automation workflow supporting multiple operation types."""
     task_id = await create_task(
@@ -2506,6 +2522,7 @@ async def listing_automation(
             "workflow_type": workflow_type,
             "max_listings": max_listings,
         },
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=max_listings, started_at=True)
     _set_account_status(account_id, "active")
@@ -2518,6 +2535,7 @@ async def listing_automation(
                 listing_ids=listing_ids,
                 max_renew=max_listings,
                 delay_seconds=delay_seconds,
+                user_id=user_id,
             )
             await update_task(
                 task_id,
@@ -2531,6 +2549,7 @@ async def listing_automation(
                 listing_ids=listing_ids,
                 max_relist=max_listings,
                 delay_seconds=delay_seconds,
+                user_id=user_id,
             )
             await update_task(
                 task_id,
@@ -2539,11 +2558,11 @@ async def listing_automation(
                 result={"workflow_type": workflow_type, "sub_task_id": result_task_id},
             )
         elif workflow_type == "delete_and_repost":
-            # Delete then relist workflow
             result_task_id = await delete_all_listings(
                 account_id=account_id,
                 status_filter="published",
                 confirm=True,
+                user_id=user_id,
             )
             await update_task(
                 task_id,
@@ -2552,7 +2571,6 @@ async def listing_automation(
                 result={"workflow_type": workflow_type, "sub_task_id": result_task_id},
             )
         elif workflow_type == "schedule":
-            # Scheduled workflow - for now just mark as pending implementation
             await update_task(
                 task_id,
                 status="failed",
@@ -2578,10 +2596,12 @@ async def relist_listings(
     listing_ids: Optional[list[str]],
     max_relist: int,
     delay_seconds: int,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "relist_listings",
         {"account_id": account_id, "max_relist": max_relist},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=max_relist, started_at=True)
     _set_account_status(account_id, "active")
@@ -2687,10 +2707,12 @@ async def draft_publisher_ai(
     max_publish: int,
     delay_seconds: int,
     improve_with_ai: bool,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "draft_publisher_ai",
         {"account_id": account_id, "max_publish": max_publish},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=max_publish, started_at=True)
     _set_account_status(account_id, "active")
@@ -2793,10 +2815,13 @@ async def draft_publisher_ai(
 async def delete_all_listings(
     account_id: str,
     status_filter: Optional[str],
+    confirm: bool = False,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "delete_all_listings",
         {"account_id": account_id, "status_filter": status_filter},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", started_at=True)
     _set_account_status(account_id, "active")
@@ -2895,6 +2920,7 @@ async def draft_publisher(
     draft_ids: Optional[list[str]],
     max_publish: int,
     delay_seconds: int,
+    user_id: str | None = None,
 ) -> str:
     return await draft_publisher_ai(
         account_id=account_id,
@@ -2902,6 +2928,7 @@ async def draft_publisher(
         max_publish=max_publish,
         delay_seconds=delay_seconds,
         improve_with_ai=False,
+        user_id=user_id,
     )
 
 
@@ -2909,10 +2936,12 @@ async def draft_delete(
     account_id: str,
     draft_ids: Optional[list[str]],
     max_delete: int,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "draft_delete",
         {"account_id": account_id, "max_delete": max_delete},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", started_at=True)
     _set_account_status(account_id, "active")
@@ -2993,11 +3022,13 @@ async def ads_multiplier(
     listing_ids: Optional[list[str]],
     multiplier: int,
     delay_seconds: int,
+    user_id: str | None = None,
 ) -> str:
     """Clone each listing N times to multiply marketplace presence."""
     task_id = await create_task(
         "ads_multiplier",
         {"account_id": account_id, "multiplier": multiplier},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", started_at=True)
     _set_account_status(account_id, "active")
@@ -3097,10 +3128,12 @@ async def fb_warmup(
     account_id: str,
     duration_minutes: int,
     actions_per_minute: int,
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "fb_warmup",
         {"account_id": account_id, "duration_minutes": duration_minutes},
+        user_id=user_id,
     )
     total_actions = duration_minutes * actions_per_minute
     await update_task(
@@ -3191,10 +3224,12 @@ async def fb_profile_updater(
     location: Optional[str],
     profile_pic_url: Optional[str],
     cover_pic_url: Optional[str],
+    user_id: str | None = None,
 ) -> str:
     task_id = await create_task(
         "fb_profile_updater",
         {"account_id": account_id},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=3, started_at=True)
     _set_account_status(account_id, "active")

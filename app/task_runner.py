@@ -41,13 +41,12 @@ def run_background_task(coro: Coroutine, task_id: str | None = None):
     asyncio.create_task(_wrapper())
 
 
-async def create_task(task_type: str, input_data: dict) -> str:
+async def create_task(task_type: str, input_data: dict, user_id=None) -> str:
     db = get_supabase()
-    result = (
-        db.table("tasks")
-        .insert({"type": task_type, "status": "pending", "input": input_data})
-        .execute()
-    )
+    payload = {"type": task_type, "status": "pending", "input": input_data}
+    if user_id:
+        payload["user_id"] = user_id
+    result = db.table("tasks").insert(payload).execute()
     return result.data[0]["id"]
 
 
@@ -93,15 +92,17 @@ async def write_log(
     status: str = "success",
     details: dict | None = None,
     error: str | None = None,
+    user_id=None,
 ):
     db = get_supabase()
-    db.table("automation_logs").insert(
-        {
-            "task_id": task_id,
-            "account_id": account_id,
-            "action": action,
-            "status": status,
-            "details": details or {},
-            "error": error,
-        }
-    ).execute()
+    payload = {
+        "task_id": task_id,
+        "account_id": account_id,
+        "action": action,
+        "status": status,
+        "details": details or {},
+        "error": error,
+    }
+    if user_id:
+        payload["user_id"] = user_id
+    db.table("automation_logs").insert(payload).execute()

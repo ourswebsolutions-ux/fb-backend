@@ -6,7 +6,7 @@ import traceback
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, Depends
 from app.models import (
     FBAccountCreate,
     FBAccountUpdate,
@@ -20,6 +20,7 @@ from app.core.database import get_supabase
 from app.core.browser import BrowserManager, normalize_session_payload, restore_session_payload
 from app.core.encryption import encrypt_password, decrypt_password
 from app.core.config import settings
+from app.core.deps import get_current_user
 
 router = APIRouter()
 
@@ -79,80 +80,66 @@ async def _extract_verified_profile(session) -> dict:
         current_url = page.url
         profile["facebook_profile_url"] = current_url if current_url else ""
 
-        for selector in [
-            '[data-pagelet="ProfileTimeline"]',
-            '[data-testid="profile-name"]',
-            'h1',
-            '[aria-label="Profile"]',
-            '[data-pagelet="FBPage"]',
-        ]:
-            try:
-                locator = page.locator(selector).first
-                if await locator.count() > 0:
-                    text = (await locator.inner_text()).strip()
-                    if text:
-                        profile["facebook_display_name"] = text
-                        break
-            except Exception:
-                continue
+        try:
+            display_name = await page.evaluate("""
+                () => {
+                    const selectors = [
+                        '[aria-label="Your profile"] span',
+                        'div[data-testid="royal_login_button"]',
+                        'span.x193iq5w',
+                    ]
+                    for (const sel of selectors) {
+                        const el = document.querySelector(sel)
+                        if (el && el.textContent?.trim()) return el.textContent.trim()
+                    }
+                    return ''
+                }
+            """)
+            profile["facebook_display_name"] = display_name or ""
+        except Exception:
+            pass
 
-        if not profile["facebook_display_name"]:
-            try:
-                text = (await page.locator('meta[property="og:title"]').first.get_attribute('content') or '').strip()
-                if text:
-                    profile["facebook_display_name"] = text
-            except Exception:
-                pass
-
-        if not profile["facebook_user_id"]:
-            try:
-                for candidate in [page.url, await page.evaluate("() => document.body.innerHTML")]:
-                    if isinstance(candidate, str):
-                        match = re.search(r"/(?:profile\.php\?id=|)([0-9]+)", candidate)
-                        if match:
-                            profile["facebook_user_id"] = match.group(1)
-                            break
-            except Exception:
-                pass
+        try:
+            user_id = ""
+            if "facebook.com" in current_url:
+                match = re.search(r'facebook\.com/(?:profile\.php\?id=)?(\d+)', current_url)
+                if match:
+                    user_id = match.group(1)
+            if not user_id:
+                user_id = await page.evaluate("""
+                    () => {
+                        const m = document.cookie.match(/c_user=(\d+)/)
+                        return m ? m[1] : ''
+                    }
+                """)
+            profile["facebook_user_id"] = user_id or ""
+        except Exception:
+            pass
 
         profile["last_verified_at"] = datetime.now(timezone.utc).isoformat()
-        return profile
-    except Exception:
-        return profile
+
+    except Exception as e:
+        print(f"[_extract_verified_profile] Error extracting profile: {e}")
+
+    return profile
 
 
-async def _navigate_to_marketplace(session, timeout_ms: int = 80000) -> str:
-    """Navigate to Marketplace using DOM readiness instead of waiting for a full page load."""
-    for attempt in range(1, 3):
-        print(f"[verify_session] Marketplace navigation attempt {attempt}/2 started")
-        try:
-            await session.page.goto(
-                "https://www.facebook.com/marketplace",
-                wait_until="domcontentloaded",
-                timeout=timeout_ms,
-            )
-            current_url = session.page.url
-            print(f"[verify_session] Marketplace navigation attempt {attempt}/2 completed: {current_url}")
-            return current_url
-        except Exception as exc:
-            message = str(exc).lower()
-            print(f"[verify_session] Marketplace navigation attempt {attempt}/2 failed: {type(exc).__name__}: {exc}")
-            if attempt == 1 and "timeout" in message:
-                print("[verify_session] Retrying Marketplace navigation once after timeout")
-                continue
-            raise
-
-
-def _merge_profile_notes(existing_notes: str | None, profile: dict) -> str:
-    """Store profile metadata in the existing notes field without breaking manual-login notes."""
-    payload: dict = {}
-    if existing_notes:
-        try:
-            parsed = _json.loads(existing_notes)
-            if isinstance(parsed, dict):
-                payload = parsed
-            else:
+def _update_notes_with_profile(existing_notes: str, profile: dict) -> str:
+    """Merge verified profile data into the existing notes JSON."""
+    try:
+        if existing_notes:
+            try:
+                payload = _json.loads(existing_notes)
+            except Exception:
                 payload = {"notes": existing_notes}
+        else:
+            payload = {}
+    except Exception:
+        try:
+            if existing_notes:
+                payload = _json.loads(existing_notes)
+            else:
+                payload = {}
         except Exception:
             payload = {"notes": existing_notes}
 
@@ -163,11 +150,11 @@ def _merge_profile_notes(existing_notes: str | None, profile: dict) -> str:
 
 
 @router.get("/")
-async def list_accounts():
+async def list_accounts(user=Depends(get_current_user)):
     db = get_supabase()
     result = db.table("fb_accounts").select(
         "id,email,phone,status,warmup_level,last_used_at,notes,created_at,proxy,cookies"
-    ).order("created_at", desc=True).execute()
+    ).eq("user_id", user.id).order("created_at", desc=True).execute()
     accounts = []
     for acc in result.data:
         acc["cookies"] = bool(acc.get("cookies"))
@@ -176,7 +163,7 @@ async def list_accounts():
 
 
 @router.post("/")
-async def create_account(body: FBAccountCreate):
+async def create_account(body: FBAccountCreate, user=Depends(get_current_user)):
     """Create a Facebook account from a verified session upload using the existing cookie-based schema."""
     db = get_supabase()
 
@@ -186,11 +173,11 @@ async def create_account(body: FBAccountCreate):
     if not body.session_data:
         raise HTTPException(status_code=400, detail="Session JSON is required")
 
-    existing = db.table("fb_accounts").select("id").eq("email", body.email).execute()
+    existing = db.table("fb_accounts").select("id").eq("email", body.email).eq("user_id", user.id).execute()
     if existing.data:
         raise HTTPException(status_code=409, detail=f"Account '{body.email}' already exists")
 
-    print(f"[create_account] Creating account for {body.email}")
+    print(f"[create_account] Creating account for {body.email} (user: {user.id})")
 
     data = body.model_dump()
     session_payload = data.pop("session_data", None)
@@ -204,6 +191,11 @@ async def create_account(body: FBAccountCreate):
     data["password"] = ""
     data["cookies"] = cookies_json
     data["status"] = "active"
+    data["user_id"] = user.id
+
+    # Only keep columns that actually exist in fb_accounts table
+    allowed_columns = {"email", "phone", "password", "proxy", "notes", "cookies", "status", "user_id"}
+    data = {k: v for k, v in data.items() if k in allowed_columns}
 
     result = db.table("fb_accounts").insert(data).execute()
     if not result.data:
@@ -217,306 +209,252 @@ async def create_account(body: FBAccountCreate):
 
 
 @router.post("/import-session", response_model=ImportSessionCreateResponse)
-async def create_import_session_account(body: ImportSessionCreateRequest) -> ImportSessionCreateResponse:
+async def create_import_session_account(
+    body: ImportSessionCreateRequest,
+    user=Depends(get_current_user),
+) -> ImportSessionCreateResponse:
     """Persist a verified import-session account without using the manual-login flow."""
     print("[import_session] Incoming request payload:", body.model_dump())
 
     validation_errors = []
     if not body.display_name and not body.facebook_user_id and not body.profile_url and not body.session:
-        validation_errors.append("At least one import-session field is required")
-    if not body.session:
-        validation_errors.append("Import session data is required")
+        validation_errors.append("At least one of display_name, facebook_user_id, profile_url, or session is required")
 
-    print("[import_session] Validation result:", {"valid": not validation_errors, "errors": validation_errors})
     if validation_errors:
-        raise HTTPException(status_code=400, detail="; ".join(validation_errors))
+        raise HTTPException(status_code=422, detail=validation_errors)
 
     db = get_supabase()
     payload = _build_import_session_payload(body)
-    print("[import_session] Database insert attempt with payload:", payload)
+    payload["user_id"] = user.id
+
     result = db.table("fb_accounts").insert(payload).execute()
-    print("[import_session] Database insert success:", result.data)
     if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to save import-session account")
+        raise HTTPException(status_code=500, detail="Failed to save import session account")
 
     created = result.data[0]
-    response = ImportSessionCreateResponse(
-        id=str(created.get("id")),
-        display_name=body.display_name or "",
-        facebook_user_id=body.facebook_user_id or "",
-        profile_url=body.profile_url or "",
-        verification_status=body.verification_status,
-        last_verified_at=body.last_verified_at or "",
-        status="active",
-        message="Import session account created successfully",
+    notes_data = {}
+    try:
+        notes_data = _json.loads(created.get("notes") or "{}")
+    except Exception:
+        pass
+
+    import_info = notes_data.get("import_session", {})
+    return ImportSessionCreateResponse(
+        id=str(created.get("id", "")),
+        display_name=import_info.get("display_name", ""),
+        facebook_user_id=import_info.get("facebook_user_id", ""),
+        profile_url=import_info.get("profile_url", ""),
+        verification_status=import_info.get("verification_status", False),
+        last_verified_at=import_info.get("last_verified_at", ""),
+        status=created.get("status", "active"),
     )
-    print("[import_session] Response returned:", response.model_dump())
-    return response
-
-
-@router.post("/verify-session")
-async def verify_session(
-    session_file: UploadFile | None = File(default=None),
-    session_data: str | None = Form(default=None),
-    account_name: str | None = Form(default=None),
-    email: str | None = Form(default=None),
-    phone: str | None = Form(default=None),
-) -> ImportSessionResponse:
-    """Verify an uploaded Playwright/browser session file without logging in with password."""
-    request = ImportSessionRequest(account_name=account_name, session_data=session_data)
-    validation = ImportSessionValidation()
-    if not request.session_data and session_file is None:
-        raise HTTPException(status_code=400, detail="Session JSON is required")
-
-    print("[verify_session] ===== Endpoint Called =====")
-    print(f"[verify_session] account_name: {account_name}")
-    print(f"[verify_session] email: {email}")
-    print(f"[verify_session] phone: {phone}")
-    print(f"[verify_session] session_file: {session_file.filename if session_file else 'null'}")
-    print(f"[verify_session] session_data length: {len(session_data) if session_data else 0}")
-    
-    payload_text = session_data
-    if not payload_text and session_file is not None:
-        print("[verify_session] Reading payload from uploaded file...")
-        payload_text = await session_file.read()
-        try:
-            payload_text = payload_text.decode("utf-8")
-        except Exception:
-            payload_text = payload_text.decode("utf-8", errors="ignore")
-
-    if not payload_text or not payload_text.strip():
-        print("[verify_session] ERROR: No session data provided")
-        raise HTTPException(status_code=400, detail="Session JSON is required")
-
-    print("[verify_session] Parsing JSON payload...")
-    try:
-        payload = _json.loads(payload_text)
-        print(f"[verify_session] JSON parsed successfully, keys: {list(payload.keys())}")
-    except Exception as exc:
-        print(f"[verify_session] ERROR: JSON parse failed: {exc}")
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
-
-    print("[verify_session] Normalizing session payload...")
-    try:
-        normalized = normalize_session_payload(payload)
-        print(f"[verify_session] Normalized keys: {list(normalized.keys())}")
-    except Exception as exc:
-        print(f"[verify_session] ERROR: Normalization failed: {exc}")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    bm = BrowserManager(headless=True)
-    try:
-        print("[verify_session] Creating browser session...")
-        async with bm.new_session() as session:
-            print(f"[verify_session] Restoring session for: {account_name or email or phone or 'account'}")
-            await restore_session_payload(session, normalized)
-            print("[verify_session] Session restored, sleeping 2s...")
-            await asyncio.sleep(2)
-            
-            print("[verify_session] Navigating to Facebook Marketplace...")
-            current_url = await _navigate_to_marketplace(session)
-            await asyncio.sleep(2)
-
-            print(f"[verify_session] Current URL: {current_url}")
-            
-            # Check if we're logged in by looking for authentication indicators
-            is_authenticated = await session.is_logged_in()
-            print(f"[verify_session] Authentication status: {is_authenticated}")
-            
-            is_on_marketplace = "marketplace" in current_url
-            print(f"[verify_session] Marketplace detection: {is_on_marketplace}")
-            
-            if is_authenticated and is_on_marketplace:
-                print("[verify_session] SUCCESS: Session verified!")
-                profile = await _extract_verified_profile(session)
-                return {
-                    "verified": True,
-                    "success": True,
-                    "message": "Session verified successfully",
-                    "profile": profile,
-                }
-            elif is_on_marketplace:
-                print("[verify_session] On marketplace but authentication unclear")
-                return {
-                    "verified": True,
-                    "success": True,
-                    "message": "Session verified successfully"
-                }
-            else:
-                print("[verify_session] FAILED: Not on marketplace")
-                return {
-                    "verified": False,
-                    "success": False,
-                    "message": f"Session could not be verified. Ended at: {current_url}"
-                }
-    except Exception as exc:
-        error_msg = f"{type(exc).__name__}: {str(exc)}"
-        print(f"[verify_session] ERROR: {error_msg}")
-        print(f"[verify_session] Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Session verification failed: {error_msg}") from exc
-
-
-@router.post("/{account_id}/verify")
-async def verify_account(account_id: str):
-    """Re-verify an existing account by reusing the same session verification workflow as the initial Verify Session."""
-    print(f"[verify_account] Re-verification started for account {account_id}")
-    db = get_supabase()
-    result = db.table("fb_accounts").select("*").eq("id", account_id).limit(1).execute()
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    account = result.data[0]
-    raw_cookies = account.get("cookies")
-    if not raw_cookies:
-        print(f"[verify_account] No saved session cookies for account {account_id}")
-        db.table("fb_accounts").update({"status": "idle"}).eq("id", account_id).execute()
-        raise HTTPException(status_code=400, detail="No saved session cookies found. Please add the account again using a verified session JSON file.")
-
-    if isinstance(raw_cookies, str):
-        try:
-            raw_cookies = _json.loads(raw_cookies)
-        except Exception as exc:
-            print(f"[verify_account] Invalid stored session payload for account {account_id}: {exc}")
-            db.table("fb_accounts").update({"status": "idle"}).eq("id", account_id).execute()
-            raise HTTPException(status_code=400, detail="Saved session data is invalid") from exc
-
-    bm = BrowserManager(headless=True)
-    try:
-        print(f"[verify_account] Restoring stored session for account {account_id}")
-        async with bm.new_session(proxy=account.get("proxy")) as session:
-            await restore_session_payload(session, raw_cookies)
-            print(f"[verify_account] Session restoration completed for account {account_id}")
-            await asyncio.sleep(2)
-
-            print(f"[verify_account] Marketplace navigation started for account {account_id}")
-            current_url = await _navigate_to_marketplace(session)
-            await asyncio.sleep(2)
-            print(f"[verify_account] Marketplace navigation completed for account {account_id}: {current_url}")
-
-            is_authenticated = await session.is_logged_in()
-            is_on_marketplace = "marketplace" in current_url
-            print(f"[verify_account] Authentication status: {is_authenticated}")
-            print(f"[verify_account] Marketplace detection: {is_on_marketplace}")
-
-            if is_authenticated and is_on_marketplace:
-                print(f"[verify_account] Verification succeeded for account {account_id}")
-                cookies_json = await session.save_cookies()
-                db.table("fb_accounts").update({"cookies": cookies_json, "status": "active"}).eq("id", account_id).execute()
-                print(f"[verify_account] Account status updated to active for account {account_id}")
-                return {"verified": True, "message": "Session restored and verified successfully"}
-
-            print(f"[verify_account] Verification failed for account {account_id}; marking account as idle")
-            db.table("fb_accounts").update({"status": "idle"}).eq("id", account_id).execute()
-            raise HTTPException(status_code=400, detail="Saved session cookies are no longer valid. Please re-add the account with a fresh verified session JSON file.")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        print(f"[verify_account] Verification error for account {account_id}: {exc}")
-        db.table("fb_accounts").update({"status": "idle"}).eq("id", account_id).execute()
-        raise HTTPException(status_code=500, detail=f"Session verification failed: {exc}") from exc
-
-
-# Backward compatibility alias
-@router.post("/{account_id}/verify-interactive")
-async def verify_interactive_alias(account_id: str):
-    return await verify_account(account_id)
 
 
 @router.get("/{account_id}")
-async def get_account(account_id: str):
+async def get_account(account_id: str, user=Depends(get_current_user)):
     db = get_supabase()
-    result = db.table("fb_accounts").select("*").eq("id", account_id).limit(1).execute()
+    result = db.table("fb_accounts").select("*").eq("id", account_id).eq("user_id", user.id).limit(1).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Account not found")
-    data = result.data[0]
-
-    print(f"[get_account] Account {account_id}:")
-    print(f"[get_account] - Email: {data.get('email')}")
-    print(f"[get_account] - Phone: {data.get('phone')}")
-    print(f"[get_account] - Has password: {bool(data.get('password'))}")
-    print(f"[get_account] - Password length: {len(data.get('password', ''))}")
-    print(f"[get_account] - Has cookies: {bool(data.get('cookies'))}")
-    print(f"[get_account] - Cookie length: {len(data.get('cookies', '')) if data.get('cookies') else 0}")
-    print(f"[get_account] - Status: {data.get('status')}")
-
-    data.pop("password", None)
-    return data
+    acc = dict(result.data[0])
+    acc["cookies"] = bool(acc.get("cookies"))
+    return acc
 
 
 @router.patch("/{account_id}")
-async def update_account(account_id: str, body: FBAccountUpdate):
+async def update_account(account_id: str, body: FBAccountUpdate, user=Depends(get_current_user)):
     db = get_supabase()
+    # Verify ownership
+    existing = db.table("fb_accounts").select("id").eq("id", account_id).eq("user_id", user.id).limit(1).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
     patch = {k: v for k, v in body.model_dump().items() if v is not None}
     if not patch:
         raise HTTPException(status_code=400, detail="No fields to update")
-
-    if "password" in patch and settings.encryption_key:
+    if "password" in patch:
         patch["password"] = encrypt_password(patch["password"])
 
-    result = db.table("fb_accounts").update(patch).eq("id", account_id).execute()
+    result = db.table("fb_accounts").update(patch).eq("id", account_id).eq("user_id", user.id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Account not found")
-    return result.data[0]
+    acc = dict(result.data[0])
+    acc["cookies"] = bool(acc.get("cookies"))
+    return acc
 
 
 @router.delete("/{account_id}")
-async def delete_account(account_id: str):
+async def delete_account(account_id: str, user=Depends(get_current_user)):
     db = get_supabase()
-    db.table("fb_accounts").delete().eq("id", account_id).execute()
+    existing = db.table("fb_accounts").select("id").eq("id", account_id).eq("user_id", user.id).limit(1).execute()
+    if not existing.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+    db.table("fb_accounts").delete().eq("id", account_id).eq("user_id", user.id).execute()
     return {"deleted": True}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
+# ── Headless browser manager for verify endpoints ─────────────────────────────
 _headless_bm: BrowserManager | None = None
+_headless_bm_lock = asyncio.Lock()
 
-def _get_headless_bm() -> BrowserManager:
+
+async def _get_headless_bm() -> BrowserManager:
     global _headless_bm
-    if _headless_bm is None:
-        _headless_bm = BrowserManager(headless=True)
+    async with _headless_bm_lock:
+        if _headless_bm is None or not _headless_bm._started:
+            _headless_bm = BrowserManager(headless=True)
+            await _headless_bm.start()
     return _headless_bm
 
 
 async def _stop_headless_bm():
-    """Properly shut down the headless browser manager to avoid resource leaks."""
     global _headless_bm
-    bm = _headless_bm
-    _headless_bm = None
-    if bm is not None:
-        try:
-            await bm.stop()
-        except Exception as e:
-            print(f"[accounts] _stop_headless_bm error: {e}")
+    if _headless_bm and _headless_bm._started:
+        await _headless_bm.stop()
+        _headless_bm = None
 
 
-async def _verify_headless(identifier: str, password: str, proxy: str = None) -> dict:
-    """Quick headless verification — works for accounts without 2FA."""
-    bm = _get_headless_bm()
+@router.post("/{account_id}/verify")
+async def verify_account(account_id: str, user=Depends(get_current_user)):
+    """Headless-verify that the saved session/cookies are still valid for this account."""
+    db = get_supabase()
+    result = db.table("fb_accounts").select("*").eq("id", account_id).eq("user_id", user.id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    account = result.data[0]
+    cookies_raw = account.get("cookies")
+    if not cookies_raw:
+        raise HTTPException(status_code=400, detail="No session data (cookies) saved for this account")
+
     try:
-        async with bm.new_session(proxy=proxy) as session:
-            login_success = await bm.login(session, identifier, password)
-            current_url = session.page.url
+        bm = await _get_headless_bm()
+        session = await bm.create_session(account_id)
+        try:
+            cookies = _json.loads(cookies_raw) if isinstance(cookies_raw, str) else cookies_raw
+            await restore_session_payload(session, {"cookies": cookies})
+            await session.page.goto("https://www.facebook.com/", timeout=30000)
+            await asyncio.sleep(2)
 
-            landed_on_home = current_url in (
-                "https://www.facebook.com/",
-                "https://www.facebook.com",
-            )
+            is_logged_in = await session.page.evaluate("""
+                () => {
+                    return !document.querySelector('[data-testid="royal_login_button"]') &&
+                           !document.querySelector('#email') &&
+                           (document.querySelector('[aria-label="Facebook"]') !== null ||
+                            window.location.pathname !== '/login/')
+                }
+            """)
 
-            if login_success or landed_on_home:
-                await asyncio.sleep(3)
-                cookies_json = await session.save_cookies()
-                return {"success": True, "cookies": cookies_json}
+            if is_logged_in:
+                profile = await _extract_verified_profile(session)
+                notes_updated = _update_notes_with_profile(account.get("notes", ""), profile)
+                db.table("fb_accounts").update({
+                    "status": "active",
+                    "last_used_at": datetime.now(timezone.utc).isoformat(),
+                    "notes": notes_updated,
+                }).eq("id", account_id).execute()
+                return {"verified": True, "status": "active", "profile": profile}
+            else:
+                db.table("fb_accounts").update({"status": "banned"}).eq("id", account_id).execute()
+                return {"verified": False, "status": "banned", "message": "Session appears to be logged out or banned"}
 
-            if "checkpoint" in current_url or "two_step" in current_url or "approvals" in current_url:
-                return {"success": False, "error": "2FA/checkpoint — use Verify button for manual completion"}
-            if "/login" in current_url or "login.php" in current_url:
-                return {"success": False, "error": "Wrong email or password"}
-            return {"success": False, "error": f"Login did not succeed (URL: {current_url})"}
+        finally:
+            await bm.close_session(account_id)
 
     except Exception as e:
-        print(f"[verify_headless] {traceback.format_exc()}")
-        return {"success": False, "error": f"{type(e).__name__}: {str(e) or 'no message'}"}
-    # finally:
-        # Do NOT call _stop_headless_bm() here because the browser might be
-        # reused by a subsequent _verify_headless call from another request.
-        # Shutdown is managed externally (e.g. via FastAPI lifespan shutdown event).
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
+
+
+@router.post("/{account_id}/verify-interactive")
+async def verify_account_interactive(account_id: str, user=Depends(get_current_user)):
+    """Open a visible browser window so the user can manually fix the session."""
+    db = get_supabase()
+    result = db.table("fb_accounts").select("*").eq("id", account_id).eq("user_id", user.id).limit(1).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    account = result.data[0]
+    try:
+        visible_bm = BrowserManager(headless=False)
+        await visible_bm.start()
+        session = await visible_bm.create_session(account_id)
+
+        cookies_raw = account.get("cookies")
+        if cookies_raw:
+            cookies = _json.loads(cookies_raw) if isinstance(cookies_raw, str) else cookies_raw
+            await restore_session_payload(session, {"cookies": cookies})
+
+        await session.page.goto("https://www.facebook.com/", timeout=30000)
+        await asyncio.sleep(15)
+
+        profile = await _extract_verified_profile(session)
+        cookies_after = await session.context.cookies()
+        notes_updated = _update_notes_with_profile(account.get("notes", ""), profile)
+
+        db.table("fb_accounts").update({
+            "status": "active",
+            "cookies": _json.dumps(cookies_after),
+            "last_used_at": datetime.now(timezone.utc).isoformat(),
+            "notes": notes_updated,
+        }).eq("id", account_id).execute()
+
+        await visible_bm.stop()
+        return {"verified": True, "status": "active", "profile": profile}
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Interactive verification failed: {str(e)}")
+
+
+@router.post("/verify-session")
+async def verify_session_upload(
+    file: UploadFile = File(None),
+    session_file: UploadFile = File(None),
+    session_json: str = Form(None),
+    session_data: str = Form(None),
+):
+    """
+    Verify an uploaded session JSON before saving it as an account.
+    No auth required — this is a pre-save validation step.
+    Accepts both field name variants used by the frontend:
+      file / session_file  — multipart upload
+      session_json / session_data — raw JSON string
+    """
+    # Accept both field name variants from frontend
+    upload   = file or session_file
+    raw_json = session_json or session_data
+
+    raw = None
+    if upload:
+        content = await upload.read()
+        try:
+            raw = _json.loads(content)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON in uploaded file")
+    elif raw_json:
+        try:
+            raw = _json.loads(raw_json)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON in session_data field")
+    else:
+        raise HTTPException(status_code=400, detail="Provide either a file upload or session_json field")
+
+    normalized = normalize_session_payload(raw)
+    cookies = normalized.get("cookies") or []
+
+    if not cookies:
+        return {
+            "valid": False,
+            "message": "No cookies found in session data",
+            "cookie_count": 0,
+        }
+
+    fb_cookies = [c for c in cookies if "facebook" in c.get("domain", "").lower()]
+
+    return {
+        "valid": len(fb_cookies) > 0,
+        "message": "Session appears valid" if fb_cookies else "No Facebook cookies found",
+        "cookie_count": len(cookies),
+        "fb_cookie_count": len(fb_cookies),
+    }

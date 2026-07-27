@@ -32,10 +32,8 @@ from app.core.websocket_manager import broadcast_event
 import os
 _IS_DOCKER = os.path.exists('/.dockerenv') or os.environ.get('RUNNING_IN_DOCKER') == '1'
 
-_browser_manager = BrowserManager()
-# In Docker: headless=True — no X server available
-# Locally: headless=False — user can see browser and handle 2FA/CAPTCHA
-_inbox_browser_manager = BrowserManager(headless=False)
+_browser_manager = BrowserManager(headless=True)
+_inbox_browser_manager = BrowserManager(headless=True)
 _ai_service = AIService()
 
 MESSAGES_URL = "https://www.facebook.com/marketplace/inbox/"
@@ -1220,6 +1218,7 @@ async def get_inbox_messages(
     reply_status: Optional[str] = None,
     limit: int = 50,
     include_unassigned: bool = False,
+    user_id: Optional[str] = None,
 ) -> list[dict]:
     db = get_supabase()
     query = (
@@ -1228,6 +1227,9 @@ async def get_inbox_messages(
         .order("created_at", desc=True)
         .limit(limit)
     )
+    # Always filter by user_id when provided
+    if user_id:
+        query = query.eq("user_id", user_id)
     if account_id:
         if include_unassigned:
             query = query.or_(f"account_id.eq.{account_id},account_id.is.null")
@@ -1243,11 +1245,13 @@ async def get_inbox_messages(
 async def read_inbox_messages(
     account_id: str,
     max_messages: int = 50,
+    user_id: Optional[str] = None,
 ) -> str:
     """Read unread messages from FB Marketplace inbox (Selling + Buying tabs) and store them."""
     task_id = await create_task(
         "inbox_read",
         {"account_id": account_id, "max_messages": max_messages},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=max_messages, started_at=True)
     _set_account_status(account_id, "active")
@@ -1622,11 +1626,13 @@ async def auto_reply_messages(
     tone: str = "friendly",
     custom_instructions: str = "",
     delay_seconds: int = 15,
+    user_id: Optional[str] = None,
 ) -> str:
     """Generate AI replies for pending inbox messages and send them."""
     task_id = await create_task(
         "inbox_auto_reply",
         {"account_id": account_id, "max_replies": max_replies, "tone": tone},
+        user_id=user_id,
     )
     await update_task(task_id, status="running", total_steps=max_replies, started_at=True)
     _set_account_status(account_id, "active")
