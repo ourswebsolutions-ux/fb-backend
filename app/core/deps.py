@@ -6,36 +6,40 @@ Usage:
 
     @router.get("/")
     async def my_route(user = Depends(get_current_user)):
-        # user.id  → Supabase user UUID (str)
+        # user.id    → Supabase user UUID (str)
         # user.email → logged-in user email
         ...
 """
 
-from fastapi import Depends, HTTPException, Header
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import create_client
 from app.core.config import settings
+
+# HTTPBearer makes Swagger show the "Authorize 🔒" button
+_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def _anon_client():
     return create_client(settings.supabase_url, settings.supabase_anon_key)
 
 
-async def get_current_user(authorization: str = Header(...)):
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer_scheme),
+):
     """
-    FastAPI dependency that validates the Bearer JWT token sent by the frontend
-    and returns the Supabase user object.
+    FastAPI dependency that validates the Bearer JWT token.
+    Works both from frontend (Authorization header) and Swagger UI (Authorize button).
 
     Raises 401 if the token is missing, invalid, or expired.
     """
-    if not authorization or not authorization.startswith("Bearer "):
+    if not credentials or not credentials.credentials:
         raise HTTPException(
             status_code=401,
-            detail="Authorization header missing or malformed. Expected: 'Bearer <token>'",
+            detail="Not authenticated. Provide a Bearer token.",
         )
 
-    token = authorization.replace("Bearer ", "").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Bearer token is empty")
+    token = credentials.credentials.strip()
 
     try:
         client = _anon_client()

@@ -5,8 +5,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 # ── Windows event-loop safety ─────────────────────────────────────────────────
-# Playwright requires ProactorEventLoop on Windows for create_subprocess_exec().
-# Set the policy BEFORE any async code runs (module-level).
 if sys.platform == "win32":
     current_policy = asyncio.get_event_loop_policy()
     if not isinstance(current_policy, asyncio.WindowsProactorEventLoopPolicy):
@@ -21,11 +19,34 @@ if sys.platform == "win32":
 from app.routers import accounts, listings, automation, tasks, auth, inbox, websocket
 
 
+async def _cleanup_old_uploads():
+    """Delete uploaded images older than 7 days from the uploads/ directory."""
+    import time
+    from pathlib import Path
+
+    upload_dir = Path(__file__).parent / "uploads"
+    if not upload_dir.exists():
+        return
+
+    cutoff = time.time() - (7 * 24 * 60 * 60)  # 7 days in seconds
+    deleted = 0
+    for f in upload_dir.iterdir():
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+        except Exception:
+            pass
+    if deleted:
+        print(f"[startup] Cleaned up {deleted} old upload file(s) older than 7 days")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Startup: nothing to initialise yet ────────────────────────────────
+    # ── Startup ────────────────────────────────────────────────────────────
+    await _cleanup_old_uploads()
     yield
-    # ── Shutdown: clean up long-lived resources ───────────────────────────
+    # ── Shutdown ───────────────────────────────────────────────────────────
     print("[main] Shutting down — cleaning up resources...")
     try:
         from app.routers.accounts import _stop_headless_bm
@@ -39,6 +60,7 @@ app = FastAPI(
     description="Facebook Marketplace automation API with AI content generation",
     version="1.0.0",
     lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 app.add_middleware(

@@ -352,13 +352,13 @@ async def upload_images(files: List[UploadFile] = File(...)):
     - At least one file provided
     - MIME type is an image (jpeg / png / webp / gif)
     - File size ≤ 15 MB per image
-    - Max 10 images per request
+    - Max 50 images per request
     """
     if not files:
         raise HTTPException(status_code=400, detail="Please upload at least one product image.")
 
-    if len(files) > 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 images per upload.")
+    if len(files) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 images per upload.")
 
     saved_paths: list[str] = []
 
@@ -404,8 +404,8 @@ async def upload_images(files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="Please upload at least one product image.")
 
-    if len(files) > 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 images per upload.")
+    if len(files) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 images per upload.")
 
     saved_paths: list[str] = []
 
