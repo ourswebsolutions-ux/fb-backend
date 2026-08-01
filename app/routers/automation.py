@@ -1,10 +1,15 @@
 import os
+import os
+import json
 import uuid
 import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from pydantic import BaseModel
 from typing import List
+from groq import Groq
+from app.core.config import settings
 from app.core.deps import get_current_user
 from app.core.database import get_supabase
 from app.models import (
@@ -464,3 +469,65 @@ async def cleanup_old_uploads():
         "errors": errors,
         "message": f"Deleted {deleted} file(s) older than 7 days. {total} file(s) remaining.",
     }
+
+
+# ── AI Product Generator ──────────────────────────────────────────────────────
+
+class ProductGenerateRequest(BaseModel):
+    idea: str
+
+@router.post("/generate-product")
+async def generate_product(body: ProductGenerateRequest, user=Depends(get_current_user)):
+    if not body.idea or not body.idea.strip():
+        raise HTTPException(status_code=400, detail="Product idea is required.")
+
+    api_key = settings.groq_api_key
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured.")
+
+    try:
+        client = Groq(api_key=api_key)
+        prompt = f"""You are a professional product copywriter.
+Generate:
+1. A product title of ONLY 4-5 words.
+2. A product description of ONLY 4-5 short sentences.
+
+Rules:
+- Professional tone.
+- Do not use bullet points.
+- Do not use markdown.
+- Return ONLY valid JSON.
+
+JSON Format:
+{{
+  "title": "",
+  "description": ""
+}}
+
+Product Idea:
+{body.idea.strip()}"""
+
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            temperature=0.5,
+            messages=[
+                {"role": "system", "content": "You generate concise product titles and descriptions. Return only valid JSON."},
+                {"role": "user", "content": prompt}
+            ]
+        )
+
+        content = response.choices[0].message.content.strip()
+        # Strip markdown code blocks if present
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        content = content.strip()
+
+        data = json.loads(content)
+        return {"success": True, "title": data.get("title", ""), "description": data.get("description", "")}
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="AI returned invalid JSON. Try again.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
