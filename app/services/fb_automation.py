@@ -21,7 +21,7 @@ from app.task_runner import create_task, update_task, write_log, run_background_
 MARKETPLACE_CREATE = "https://www.facebook.com/marketplace/create/item"
 MARKETPLACE_LISTINGS = "https://www.facebook.com/marketplace/you/selling"
 
-_browser_manager = BrowserManager(headless=True)
+_browser_manager = BrowserManager(headless=False)
 _ai_service = AIService()
 
 

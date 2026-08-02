@@ -167,17 +167,21 @@ async def create_account(body: FBAccountCreate, user=Depends(get_current_user)):
     """Create a Facebook account from a verified session upload using the existing cookie-based schema."""
     db = get_supabase()
 
-    if not body.email:
-        raise HTTPException(status_code=400, detail="Email is required")
+    if not body.email and not body.phone:
+        raise HTTPException(status_code=400, detail="Email or phone number is required")
 
     if not body.session_data:
         raise HTTPException(status_code=400, detail="Session JSON is required")
 
-    existing = db.table("fb_accounts").select("id").eq("email", body.email).eq("user_id", user.id).execute()
+    identifier = body.phone or body.email or ""
+    if body.phone:
+        existing = db.table("fb_accounts").select("id").eq("phone", body.phone).eq("user_id", user.id).execute()
+    else:
+        existing = db.table("fb_accounts").select("id").eq("email", body.email).eq("user_id", user.id).execute()
     if existing.data:
-        raise HTTPException(status_code=409, detail=f"Account '{body.email}' already exists")
+        raise HTTPException(status_code=409, detail=f"Account '{identifier}' already exists")
 
-    print(f"[create_account] Creating account for {body.email} (user: {user.id})")
+    print(f"[create_account] Creating account for {identifier} (user: {user.id})")
 
     data = body.model_dump()
     session_payload = data.pop("session_data", None)
@@ -187,7 +191,8 @@ async def create_account(body: FBAccountCreate, user=Depends(get_current_user)):
     if not cookies_json or cookies_json == "[]":
         raise HTTPException(status_code=400, detail="Session JSON must contain browser cookies")
 
-    data["email"] = body.email
+    data["email"] = body.email or ""
+    data["phone"] = body.phone or None
     data["password"] = ""
     data["cookies"] = cookies_json
     data["status"] = "active"
