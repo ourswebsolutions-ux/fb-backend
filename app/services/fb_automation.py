@@ -13,6 +13,18 @@ from typing import Optional
 from urllib.parse import urljoin
 import re
 
+# Debug screenshots — only save if DEBUG_SCREENSHOTS=true in environment
+_DEBUG_SCREENSHOTS = os.getenv("DEBUG_SCREENSHOTS", "false").lower() == "true"
+
+async def _screenshot(page, path: str):
+    """Save screenshot only when debug mode is enabled."""
+    if not _DEBUG_SCREENSHOTS:
+        return
+    try:
+        await _screenshot(page, path)
+    except Exception:
+        pass
+
 
 from app.core.browser import BrowserManager, BrowserSession, do_login
 from app.core.database import get_supabase
@@ -671,13 +683,34 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
 
     # Screenshot of fresh form
     try:
-        await page.screenshot(path=f"debug_form_{listing_id_short}_loaded.png")
+        await _screenshot(page, f"debug_form_{listing_id_short}_loaded.png")
         print(f"[listing_form] Step 1 | Screenshot saved: debug_form_{listing_id_short}_loaded.png")
     except Exception as e:
         print(f"[listing_form] Step 1 | Screenshot failed: {e}")
 
     # ── Step 2: Image upload ──────────────────────────────────────────────────
     images: list[str] = listing.get("images") or []
+
+    # ── 2a. Resolve URLs to local paths ──────────────────────────────────────
+    import httpx
+    resolved_images = []
+    for img in images:
+        if img.startswith("http://") or img.startswith("https://"):
+            filename = img.split("/")[-1].split("?")[0]
+            dest = UPLOAD_DIR / filename
+            if not dest.exists():
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        r = await client.get(img)
+                        r.raise_for_status()
+                        dest.write_bytes(r.content)
+                    print(f"[listing_form] Downloaded {img} → {dest}")
+                except Exception as e:
+                    raise RuntimeError(f"Failed to download image {img}: {e}")
+            resolved_images.append(str(dest))
+        else:
+            resolved_images.append(img)
+    images = resolved_images
 
     # ── 2a. Print & verify every image path ──────────────────────────────────
     print(f"[listing_form] Step 2 | Image paths received ({len(images)}):")
@@ -693,7 +726,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
             "Upload at least one image before starting."
         )
 
-    missing = [p for p in images if not os.path.isfile(p)]
+    missing = [p for p in images if not p.startswith('http') and not os.path.isfile(p)]
     if missing:
         raise RuntimeError(
             f"Image file(s) not found on disk: {missing}. "
@@ -709,7 +742,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
         input_count = await page.locator(file_input_sel).count()
         print(f"[listing_form] Step 2 | Found {input_count} file input(s) in DOM")
     except Exception as e:
-        await page.screenshot(path=f"debug_form_{listing_id_short}_no_file_input.png")
+        await _screenshot(page, f"debug_form_{listing_id_short}_no_file_input.png")
         raise RuntimeError(
             f"No <input type='file'> found on page after 15 s: {e}. "
             f"Screenshot: debug_form_{listing_id_short}_no_file_input.png"
@@ -784,7 +817,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
                 print(f"[listing_form] Step 2 | set_input_files on input[{i}] failed: {e}")
 
         if not uploaded:
-            await page.screenshot(path=f"debug_form_{listing_id_short}_no_upload.png")
+            await _screenshot(page, f"debug_form_{listing_id_short}_no_upload.png")
             raise RuntimeError(
                 f"All image upload strategies failed. "
                 f"Screenshot: debug_form_{listing_id_short}_no_upload.png"
@@ -826,7 +859,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
     # Screenshot after upload attempt regardless of outcome
     try:
         shot_name = f"debug_form_{listing_id_short}_after_upload.png"
-        await page.screenshot(path=shot_name)
+        await _screenshot(page, shot_name)
         print(f"[listing_form] Step 2 | Post-upload screenshot: {shot_name}")
     except Exception:
         pass
@@ -947,7 +980,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
     # Full dump after navigation attempt
     await _dump_fields()
     try:
-        await page.screenshot(path=f"debug_form_{listing_id_short}_details.png")
+        await _screenshot(page, f"debug_form_{listing_id_short}_details.png")
         print(f"[form] Step 3 | Screenshot: debug_form_{listing_id_short}_details.png")
     except Exception:
         pass
@@ -971,7 +1004,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
     ], "Title")
 
     if title_el is None:
-        await page.screenshot(path=f"debug_form_{listing_id_short}_no_title.png")
+        await _screenshot(page, f"debug_form_{listing_id_short}_no_title.png")
         html = (await page.content())[:8000]
         print(f"[form] Step 4 | FAIL — HTML:\n{html}")
         raise RuntimeError(
@@ -1263,7 +1296,7 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
 
     # Final screenshot before publish
     try:
-        await page.screenshot(path=f"debug_form_{listing_id_short}_ready.png")
+        await _screenshot(page, f"debug_form_{listing_id_short}_ready.png")
         print(f"[form] Step 9 | Pre-publish screenshot: debug_form_{listing_id_short}_ready.png")
     except Exception:
         pass
@@ -1295,7 +1328,7 @@ async def _publish_listing(session: BrowserSession) -> None:
     print(f"[publish] Step 1: Checking current URL: {page.url}")
 
     try:
-        await page.screenshot(path="debug_pre_publish.png")
+        await _screenshot(page, "debug_pre_publish.png")
     except Exception:
         pass
 
@@ -1318,7 +1351,7 @@ async def _publish_listing(session: BrowserSession) -> None:
         if await error_el.count() > 0:
             err_text = (await error_el.first.inner_text()).strip()
             try:
-                await page.screenshot(path="debug_publish_error.png")
+                await _screenshot(page, "debug_publish_error.png")
             except Exception:
                 pass
             raise RuntimeError(f"Facebook error during publish: {err_text}")
@@ -1359,7 +1392,7 @@ async def _publish_listing(session: BrowserSession) -> None:
 
     if not pub_vis:
         try:
-            await page.screenshot(path="debug_publish_no_button.png")
+            await _screenshot(page, "debug_publish_no_button.png")
         except Exception:
             pass
         raise RuntimeError(
@@ -1396,7 +1429,7 @@ async def _publish_listing(session: BrowserSession) -> None:
     if await error_el.count() > 0:
         err_text = (await error_el.first.inner_text()).strip()
         try:
-            await page.screenshot(path="debug_publish_post_error.png")
+            await _screenshot(page, "debug_publish_post_error.png")
         except Exception:
             pass
         await _discard_failed_create(session)
@@ -1418,7 +1451,7 @@ async def _publish_listing(session: BrowserSession) -> None:
             'h1:has-text("All Listings"), '
             'h2:has-text("All Listings")'
         )
-        await page.locator(success_selector).first.wait_for(state="visible", timeout=60000)
+        await page.locator(success_selector).first.wait_for(state="visible", timeout=120000)
         completed = True
         completion_method = "success_message"
     except Exception:
@@ -1429,7 +1462,7 @@ async def _publish_listing(session: BrowserSession) -> None:
         try:
             print("[publish] Step 3: Waiting for Publish button to disappear...")
             publish_button = page.locator('button:has-text("Publish"), div[role="button"]:has-text("Publish")')
-            await publish_button.first.wait_for(state="hidden", timeout=60000)
+            await publish_button.first.wait_for(state="hidden", timeout=120000)
             completed = True
             completion_method = "publish_button_hidden"
         except Exception:
@@ -1441,7 +1474,7 @@ async def _publish_listing(session: BrowserSession) -> None:
             print("[publish] Step 3: Waiting for redirect away from create-item...")
             await page.wait_for_url(
                 re.compile(r'^(?!.*(/marketplace/create/item|/create)).*$'),
-                timeout=60000
+                timeout=120000
             )
             completed = True
             completion_method = "url_redirect"
@@ -1452,7 +1485,7 @@ async def _publish_listing(session: BrowserSession) -> None:
     if not completed:
         try:
             print("[publish] Step 3: Waiting for page load to stabilize...")
-            await page.wait_for_load_state("networkidle", timeout=60000)
+            await page.wait_for_load_state("networkidle", timeout=120000)
             completed = True
             completion_method = "page_load_stable"
         except Exception:
@@ -1460,7 +1493,7 @@ async def _publish_listing(session: BrowserSession) -> None:
 
     if not completed:
         try:
-            await page.screenshot(path="debug_publish_incomplete.png")
+            await _screenshot(page, "debug_publish_incomplete.png")
         except Exception:
             pass
         raise RuntimeError(
@@ -1508,7 +1541,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
             await asyncio.sleep(2)
         except Exception as e:
             try:
-                await page.screenshot(path="debug_marketplace_selling_navigation_failed.png")
+                await _screenshot(page, "debug_marketplace_selling_navigation_failed.png")
             except Exception:
                 pass
             raise RuntimeError(f"Failed to open Selling page: {e}")
@@ -1536,7 +1569,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
 
     if not search_input:
         try:
-            await page.screenshot(path="debug_marketplace_search_not_found.png")
+            await _screenshot(page, "debug_marketplace_search_not_found.png")
         except Exception:
             pass
         raise RuntimeError(
@@ -1558,7 +1591,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
         print(f"[publish] Step 5: ✓ Search results visible")
     except Exception:
         try:
-            await page.screenshot(path="debug_search_results_not_found.png")
+            await _screenshot(page, "debug_search_results_not_found.png")
         except Exception:
             pass
         raise RuntimeError(
@@ -1580,7 +1613,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
 
     if not listing_link:
         try:
-            await page.screenshot(path="debug_first_listing_not_found.png")
+            await _screenshot(page, "debug_first_listing_not_found.png")
         except Exception:
             pass
         raise RuntimeError(
@@ -1597,7 +1630,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
                 await page.evaluate("(el) => el.click()", handle)
         except Exception as e:
             try:
-                await page.screenshot(path="debug_click_listing_failed.png")
+                await _screenshot(page, "debug_click_listing_failed.png")
             except Exception:
                 pass
             raise RuntimeError(f"Failed to click first listing card: {e}")
@@ -1659,7 +1692,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
 
         if not clicked:
             try:
-                await page.screenshot(path="debug_dialog_open_failed.png")
+                await _screenshot(page, "debug_dialog_open_failed.png")
             except Exception:
                 pass
             raise RuntimeError("Could not open listing from dialog popup.")
@@ -1677,7 +1710,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
     final_url = page.url
     if not item_url_pattern.search(final_url):
         try:
-            await page.screenshot(path="debug_listing_page_not_open.png")
+            await _screenshot(page, "debug_listing_page_not_open.png")
         except Exception:
             pass
         raise RuntimeError(f"Listing page did not open. Current URL: {final_url}")
@@ -1695,7 +1728,7 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
     fb_listing_id = _extract_fb_listing_id(final_url)
     if not fb_listing_id:
         try:
-            await page.screenshot(path="debug_listing_id_extraction_failed.png")
+            await _screenshot(page, "debug_listing_id_extraction_failed.png")
         except Exception:
             pass
         raise RuntimeError(f"Could not extract listing ID from URL: {final_url}")
