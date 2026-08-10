@@ -37,7 +37,7 @@ MARKETPLACE_LISTINGS = "https://www.facebook.com/marketplace/you/selling"
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-_browser_manager = BrowserManager(headless=False)
+_browser_manager = BrowserManager(headless=True)
 _ai_service = AIService()
 
 
