@@ -1920,7 +1920,8 @@ async def publish_listing(
                 await write_log(
                     "publish_listing",
                     task_id=task_id,
-                    account_id=account_id,`n user_id=user_id,
+                    account_id=account_id,
+                    user_id=user_id,
                     details={
                         "listing_id": listing_id,
                         "facebook_listing_id": fb_id,
@@ -1939,7 +1940,8 @@ async def publish_listing(
                 await write_log(
                     "publish_listing",
                     task_id=task_id,
-                    account_id=account_id,`n user_id=user_id,
+                    account_id=account_id,
+                    user_id=user_id,
                     status="failed",
                     error=str(e),
                 )
@@ -2012,7 +2014,8 @@ async def delete_listing(
                 await write_log(
                     "delete_listing",
                     task_id=task_id,
-                    account_id=account_id,`n user_id=user_id,
+                    account_id=account_id,
+                    user_id=user_id,
                     details={"listing_id": listing_id, "fb_id": fb_id},
                 )
                 await update_task(
@@ -2027,7 +2030,8 @@ async def delete_listing(
                 await write_log(
                     "delete_listing",
                     task_id=task_id,
-                    account_id=account_id,`n user_id=user_id,
+                    account_id=account_id,
+                    user_id=user_id,
                     status="failed",
                     error=str(e),
                 )
@@ -2158,7 +2162,8 @@ async def new_account_slow(
                     await write_log(
                         "publish_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"listing_id": db_listing["id"], "fb_id": fb_id},
                     )
                 except Exception as e:
@@ -2167,7 +2172,8 @@ async def new_account_slow(
                     await write_log(
                         "publish_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -2336,7 +2342,8 @@ async def ultra_ai_listings(
                     await write_log(
                         "ultra_ai_publish",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -2444,14 +2451,16 @@ async def create_only_drafts(
                     await write_log(
                         "create_draft",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"listing_id": db_listing["id"]},
                     )
                 except Exception as e:
                     await write_log(
                         "create_draft",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -2544,14 +2553,16 @@ async def renew_listings(
                         await write_log(
                             "renew_listing",
                             task_id=task_id,
-                            account_id=account_id,`n user_id=user_id,
+                            account_id=account_id,
+                    user_id=user_id,
                             details={"fb_id": fb_id},
                         )
                 except Exception as e:
                     await write_log(
                         "renew_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -2742,14 +2753,16 @@ async def relist_listings(
                     await write_log(
                         "relist_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"original_id": listing["id"], "new_id": db_listing["id"]},
                     )
                 except Exception as e:
                     await write_log(
                         "relist_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -2853,14 +2866,16 @@ async def draft_publisher_ai(
                     await write_log(
                         "draft_publish_ai",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"listing_id": draft["id"], "fb_id": fb_id},
                     )
                 except Exception as e:
                     await write_log(
                         "draft_publish_ai",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -2956,14 +2971,16 @@ async def delete_all_listings(
                     await write_log(
                         "delete_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"listing_id": listing["id"], "fb_id": fb_id},
                     )
                 except Exception as e:
                     await write_log(
                         "delete_listing",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -3058,14 +3075,16 @@ async def draft_delete(
                     await write_log(
                         "delete_draft",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"listing_id": draft["id"]},
                     )
                 except Exception as e:
                     await write_log(
                         "delete_draft",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         status="failed",
                         error=str(e),
                     )
@@ -3172,7 +3191,8 @@ async def ads_multiplier(
                         await write_log(
                             "ads_multiplier",
                             task_id=task_id,
-                            account_id=account_id,`n user_id=user_id,
+                            account_id=account_id,
+                    user_id=user_id,
                             status="failed",
                             error=str(e),
                         )
@@ -3261,7 +3281,8 @@ async def fb_warmup(
                     await write_log(
                         "warmup_action",
                         task_id=task_id,
-                        account_id=account_id,`n user_id=user_id,
+                        account_id=account_id,
+                    user_id=user_id,
                         details={"action": action, "step": step},
                     )
                 except Exception:
@@ -3557,7 +3578,8 @@ async def fb_profile_updater(
                 await write_log(
                     "profile_update",
                     task_id=task_id,
-                    account_id=account_id,`n user_id=user_id,
+                    account_id=account_id,
+                    user_id=user_id,
                     details={"bio": bool(bio), "name": bool(name), "location": bool(location), "updates_done": updates_done},
                 )
                 print(f"[profile_updater] Done. updates_done={updates_done} errors={errors}")
@@ -3567,7 +3589,8 @@ async def fb_profile_updater(
                 await write_log(
                     "profile_update",
                     task_id=task_id,
-                    account_id=account_id,`n user_id=user_id,
+                    account_id=account_id,
+                    user_id=user_id,
                     status="failed",
                     error=str(e),
                 )
