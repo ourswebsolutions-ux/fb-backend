@@ -392,7 +392,7 @@ async def upload_images(files: List[UploadFile] = File(...)):
         with open(dest, "wb") as f:
             f.write(data)
 
-        saved_paths.append(str(dest.resolve()))
+        saved_paths.append(str(UPLOAD_DIR / filename))
         print(f"[upload_images] Saved '{upload.filename}' → {dest} ({len(data) // 1024} KB)")
 
     print(f"[upload_images] {len(saved_paths)} image(s) uploaded successfully")
@@ -437,7 +437,7 @@ async def upload_images(files: List[UploadFile] = File(...)):
         with open(dest, "wb") as f:
             f.write(data)
 
-        saved_paths.append(str(dest.resolve()))
+        saved_paths.append(str(UPLOAD_DIR / filename))
         print(f"[upload_images] Saved '{upload.filename}' → {dest} ({len(data) // 1024} KB)")
 
     print(f"[upload_images] {len(saved_paths)} image(s) uploaded successfully")
