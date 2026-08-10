@@ -5,7 +5,7 @@ import uuid
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from pydantic import BaseModel
 from typing import List
 from groq import Groq
@@ -347,11 +347,10 @@ async def listing_automation(body: ListingAutomationRequest, user=Depends(get_cu
 # ── Image upload ──────────────────────────────────────────────────────────────
 
 @router.post("/upload-images")
-async def upload_images(files: List[UploadFile] = File(...)):
+async def upload_images(request: Request, files: List[UploadFile] = File(...)):
     """
     Accept multipart image uploads from the frontend.
-    Saves files to disk under /uploads/ and returns the absolute paths
-    that Playwright will use to set_input_files().
+    Saves files to disk under /uploads/ and returns public URLs.
 
     Validates:
     - At least one file provided
@@ -366,6 +365,10 @@ async def upload_images(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail="Maximum 50 images per upload.")
 
     saved_paths: list[str] = []
+    public_urls: list[str] = []
+
+    # Build base URL from request
+    base_url = str(request.base_url).rstrip('/')
 
     for upload in files:
         content_type = upload.content_type or ""
@@ -393,15 +396,16 @@ async def upload_images(files: List[UploadFile] = File(...)):
             f.write(data)
 
         saved_paths.append(str(UPLOAD_DIR / filename))
+        public_urls.append(f"{base_url}/uploads/{filename}")
         print(f"[upload_images] Saved '{upload.filename}' → {dest} ({len(data) // 1024} KB)")
 
     print(f"[upload_images] {len(saved_paths)} image(s) uploaded successfully")
-    return {"paths": saved_paths, "count": len(saved_paths)}
+    return {"paths": public_urls, "count": len(public_urls)}
 
 # ── Image upload ──────────────────────────────────────────────────────────────
 
 @router.post("/upload-images")
-async def upload_images(files: List[UploadFile] = File(...)):
+async def upload_images(request: Request, files: List[UploadFile] = File(...)):
     """
     Accept multipart image uploads from the frontend.
     No auth required — images are server-local paths used by Playwright.
@@ -413,6 +417,8 @@ async def upload_images(files: List[UploadFile] = File(...)):
         raise HTTPException(status_code=400, detail="Maximum 50 images per upload.")
 
     saved_paths: list[str] = []
+    public_urls: list[str] = []
+    base_url = str(request.base_url).rstrip('/')
 
     for upload in files:
         content_type = upload.content_type or ""
@@ -438,10 +444,11 @@ async def upload_images(files: List[UploadFile] = File(...)):
             f.write(data)
 
         saved_paths.append(str(UPLOAD_DIR / filename))
+        public_urls.append(f"{base_url}/uploads/{filename}")
         print(f"[upload_images] Saved '{upload.filename}' → {dest} ({len(data) // 1024} KB)")
 
     print(f"[upload_images] {len(saved_paths)} image(s) uploaded successfully")
-    return {"paths": saved_paths, "count": len(saved_paths)}
+    return {"paths": public_urls, "count": len(public_urls)}
 
 
 @router.post("/cleanup-uploads")

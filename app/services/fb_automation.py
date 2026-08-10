@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import random
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 import re
@@ -20,6 +21,9 @@ from app.task_runner import create_task, update_task, write_log, run_background_
 
 MARKETPLACE_CREATE = "https://www.facebook.com/marketplace/create/item"
 MARKETPLACE_LISTINGS = "https://www.facebook.com/marketplace/you/selling"
+
+UPLOAD_DIR = Path(__file__).parent.parent.parent / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 _browser_manager = BrowserManager(headless=True)
 _ai_service = AIService()
@@ -508,6 +512,42 @@ def _normalize_category(category: Optional[str]) -> Optional[str]:
 
     parts = [w if w == "and" else w.capitalize() for w in normalized.split()]
     return " ".join(parts)
+
+
+async def _resolve_images(images: list[str]) -> list[str]:
+    """
+    Accept image paths OR public URLs.
+    - If URL (http/https): download to local uploads/ dir and return local path.
+    - If local path: verify it exists.
+    Returns list of local file paths ready for Playwright set_input_files().
+    """
+    import httpx
+    if not images:
+        raise ValueError("No images provided. Please upload at least one product image.")
+
+    resolved = []
+    for img in images:
+        if img.startswith("http://") or img.startswith("https://"):
+            # Download URL to local uploads dir
+            filename = img.split("/")[-1].split("?")[0]
+            dest = UPLOAD_DIR / filename
+            if not dest.exists():
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        r = await client.get(img)
+                        r.raise_for_status()
+                        dest.write_bytes(r.content)
+                    print(f"[resolve_images] Downloaded {img} → {dest}")
+                except Exception as e:
+                    raise ValueError(f"Failed to download image {img}: {e}")
+            resolved.append(str(dest))
+        else:
+            if not os.path.isfile(img):
+                raise ValueError(
+                    f"Image file not found on server: {img}. Please re-upload your images."
+                )
+            resolved.append(img)
+    return resolved
 
 
 def _validate_images(images: list[str]) -> list[str]:
@@ -2009,9 +2049,9 @@ async def new_account_slow(
     _set_account_status(account_id, "active")
 
     async def _run():
-        # Validate image paths exist on disk before opening any browser
+        # Resolve image URLs/paths — download if URL, verify if local path
         try:
-            _validate_images(images)
+            resolved_images = await _resolve_images(images)
         except ValueError as ve:
             await update_task(task_id, status="failed", error=str(ve), finished_at=True)
             _set_account_status(account_id, "idle")
@@ -2036,8 +2076,8 @@ async def new_account_slow(
                 title = product_name or f"Item for sale {i + 1}"
                 description_text = description or None
 
-                # Pick image for this listing — images[i % len(images)] cycles if fewer images than listings
-                listing_image = [images[i % len(images)]] if images else []
+                # Pick image for this listing — resolved_images[i % len] cycles if fewer images than listings
+                listing_image = [resolved_images[i % len(resolved_images)]] if resolved_images else []
 
                 if use_ai and product_name:
                     try:
@@ -2189,9 +2229,9 @@ async def ultra_ai_listings(
     _set_account_status(account_id, "active")
 
     async def _run():
-        # Validate image paths exist on disk before opening any browser
+        # Resolve image URLs/paths — download if URL, verify if local path
         try:
-            _validate_images(images)
+            resolved_images = await _resolve_images(images)
         except ValueError as ve:
             await update_task(task_id, status="failed", error=str(ve), finished_at=True)
             _set_account_status(account_id, "idle")

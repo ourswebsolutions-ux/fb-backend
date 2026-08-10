@@ -2,6 +2,8 @@ import asyncio
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 # ── Windows event-loop safety ─────────────────────────────────────────────────
@@ -73,7 +75,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
-         "https://vps.axorawebsolutions.com/"
+         
     ],
     allow_origin_regex=r"https?://.*",
     allow_credentials=True,
@@ -88,6 +90,11 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(inbox.router, prefix="/api/inbox", tags=["inbox"])
 app.include_router(websocket.router, prefix="/api", tags=["websocket"])
+
+# ── Static files — serve uploaded images ─────────────────────────────────────
+UPLOAD_DIR = Path(__file__).parent / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
 
