@@ -10,3 +10,5 @@ httpx>=0.24
 websockets>=13.0.0
 python-multipart
 email-validator
+groq==0.13.1
+aiofiles
