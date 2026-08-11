@@ -306,7 +306,7 @@ _headless_bm_lock = asyncio.Lock()
 async def _get_headless_bm() -> BrowserManager:
     global _headless_bm
     async with _headless_bm_lock:
-        if _headless_bm is None or not _headless_bm._started:
+        if _headless_bm is None or not _headless_bm._browser_ready():
             _headless_bm = BrowserManager(headless=True)
             await _headless_bm.start()
     return _headless_bm
@@ -314,7 +314,7 @@ async def _get_headless_bm() -> BrowserManager:
 
 async def _stop_headless_bm():
     global _headless_bm
-    if _headless_bm and _headless_bm._started:
+    if _headless_bm and _headless_bm._browser_ready():
         await _headless_bm.stop()
         _headless_bm = None
 
@@ -334,37 +334,36 @@ async def verify_account(account_id: str, user=Depends(get_current_user)):
 
     try:
         bm = await _get_headless_bm()
-        session = await bm.create_session(account_id)
-        try:
-            cookies = _json.loads(cookies_raw) if isinstance(cookies_raw, str) else cookies_raw
-            await restore_session_payload(session, {"cookies": cookies})
-            await session.page.goto("https://www.facebook.com/", timeout=30000)
-            await asyncio.sleep(2)
+        async with bm.new_session(cookies_json=cookies_raw) as session:
+            try:
+                cookies = _json.loads(cookies_raw) if isinstance(cookies_raw, str) else cookies_raw
+                await restore_session_payload(session, {"cookies": cookies})
+                await session.page.goto("https://www.facebook.com/", timeout=30000)
+                await asyncio.sleep(2)
 
-            is_logged_in = await session.page.evaluate("""
-                () => {
-                    return !document.querySelector('[data-testid="royal_login_button"]') &&
-                           !document.querySelector('#email') &&
-                           (document.querySelector('[aria-label="Facebook"]') !== null ||
-                            window.location.pathname !== '/login/')
-                }
-            """)
+                is_logged_in = await session.page.evaluate("""
+                    () => {
+                        return !document.querySelector('[data-testid="royal_login_button"]') &&
+                               !document.querySelector('#email') &&
+                               (document.querySelector('[aria-label="Facebook"]') !== null ||
+                                window.location.pathname !== '/login/')
+                    }
+                """)
 
-            if is_logged_in:
-                profile = await _extract_verified_profile(session)
-                notes_updated = _update_notes_with_profile(account.get("notes", ""), profile)
-                db.table("fb_accounts").update({
-                    "status": "active",
-                    "last_used_at": datetime.now(timezone.utc).isoformat(),
-                    "notes": notes_updated,
-                }).eq("id", account_id).execute()
-                return {"verified": True, "status": "active", "profile": profile}
-            else:
-                db.table("fb_accounts").update({"status": "banned"}).eq("id", account_id).execute()
-                return {"verified": False, "status": "banned", "message": "Session appears to be logged out or banned"}
-
-        finally:
-            await bm.close_session(account_id)
+                if is_logged_in:
+                    profile = await _extract_verified_profile(session)
+                    notes_updated = _update_notes_with_profile(account.get("notes", ""), profile)
+                    db.table("fb_accounts").update({
+                        "status": "active",
+                        "last_used_at": datetime.now(timezone.utc).isoformat(),
+                        "notes": notes_updated,
+                    }).eq("id", account_id).execute()
+                    return {"verified": True, "status": "active", "profile": profile}
+                else:
+                    db.table("fb_accounts").update({"status": "banned"}).eq("id", account_id).execute()
+                    return {"verified": False, "status": "banned", "message": "Session appears to be logged out or banned"}
+            except Exception as inner_e:
+                raise inner_e
 
     except Exception as e:
         traceback.print_exc()
@@ -383,26 +382,25 @@ async def verify_account_interactive(account_id: str, user=Depends(get_current_u
     try:
         visible_bm = BrowserManager(headless=False)
         await visible_bm.start()
-        session = await visible_bm.create_session(account_id)
+        async with visible_bm.new_session(cookies_json=account.get("cookies")) as session:
+            cookies_raw = account.get("cookies")
+            if cookies_raw:
+                cookies = _json.loads(cookies_raw) if isinstance(cookies_raw, str) else cookies_raw
+                await restore_session_payload(session, {"cookies": cookies})
 
-        cookies_raw = account.get("cookies")
-        if cookies_raw:
-            cookies = _json.loads(cookies_raw) if isinstance(cookies_raw, str) else cookies_raw
-            await restore_session_payload(session, {"cookies": cookies})
+            await session.page.goto("https://www.facebook.com/", timeout=30000)
+            await asyncio.sleep(15)
 
-        await session.page.goto("https://www.facebook.com/", timeout=30000)
-        await asyncio.sleep(15)
+            profile = await _extract_verified_profile(session)
+            cookies_after = await session.context.cookies()
+            notes_updated = _update_notes_with_profile(account.get("notes", ""), profile)
 
-        profile = await _extract_verified_profile(session)
-        cookies_after = await session.context.cookies()
-        notes_updated = _update_notes_with_profile(account.get("notes", ""), profile)
-
-        db.table("fb_accounts").update({
-            "status": "active",
-            "cookies": _json.dumps(cookies_after),
-            "last_used_at": datetime.now(timezone.utc).isoformat(),
-            "notes": notes_updated,
-        }).eq("id", account_id).execute()
+            db.table("fb_accounts").update({
+                "status": "active",
+                "cookies": _json.dumps(cookies_after),
+                "last_used_at": datetime.now(timezone.utc).isoformat(),
+                "notes": notes_updated,
+            }).eq("id", account_id).execute()
 
         await visible_bm.stop()
         return {"verified": True, "status": "active", "profile": profile}
