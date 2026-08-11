@@ -625,6 +625,24 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
     if "login" in current_url or "checkpoint" in current_url:
         raise RuntimeError(f"Redirected to {current_url} — session expired before form")
 
+    # Check if redirected away from create page — marketplace access may be restricted
+    if "create" not in current_url:
+        print(f"[listing_form] Step 1 | WARNING: Not on create page — landed on {current_url}")
+        # Try navigating again
+        await asyncio.sleep(2)
+        await page.goto(MARKETPLACE_CREATE, timeout=60000)
+        await page.wait_for_load_state("domcontentloaded", timeout=30000)
+        await asyncio.sleep(3)
+        current_url = page.url
+        print(f"[listing_form] Step 1 | After retry — Landed on: {current_url}")
+        if "create" not in current_url:
+            raise RuntimeError(
+                f"Facebook redirected to '{current_url}' instead of create-item page. "
+                "This account may not have Marketplace selling access. "
+                "Try: 1) Use the account on Facebook manually first to enable Marketplace. "
+                "2) Check if the account is restricted."
+            )
+
     # ── Step 1.5: Handle account/page selection if prompted ─────────────────────
     # Facebook sometimes prompts to select which account/page to use for Marketplace
     print(f"[listing_form] Step 1.5 | Checking for account/page selection prompt...")
