@@ -362,71 +362,118 @@ async def _open_newly_published_listing(session: BrowserSession) -> Optional[str
     return None
 
 
-async def _find_listing_by_title_after_publish(session: BrowserSession, title: str) -> Optional[str]:
+async def _find_listing_by_title_after_publish(
+    session: BrowserSession,
+    title: str
+) -> Optional[str]:
     """
-    After Publish redirect, wait for the user's listings page to finish loading,
-    search inside the "Your Listings" section using the exact saved title,
-    click the matched listing, and return the final listing page URL.
+    After Publish redirect, wait for the user's listings page,
+    search using the exact saved title, click the matched listing,
+    and return the final listing page URL.
+
+    Does not use networkidle.
     """
+
     page = session.page
 
-    # If we're already on an item URL, return it immediately.
+    # ─────────────────────────────────────────────────────────────
+    # Already on listing page?
+    # ─────────────────────────────────────────────────────────────
     current = page.url
+
     if _extract_fb_listing_id(current):
         print(f"[publish] Already on listing URL: {current}")
         return current
 
-    print('[publish] Waiting for post-publish redirect and page stability...')
+    print("[publish] Waiting for post-publish page...")
+
+    # Do NOT use networkidle.
     try:
-        await page.wait_for_load_state('networkidle', timeout=60000)
+        await page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=30000
+        )
     except Exception:
         pass
 
+    await asyncio.sleep(2)
+
+    # ─────────────────────────────────────────────────────────────
+    # Find listings heading
+    # ─────────────────────────────────────────────────────────────
     heading_selectors = [
-        'h1:has-text("All Listings")', 'h2:has-text("All Listings")', 'h3:has-text("All Listings")',
+        'h1:has-text("All Listings")',
+        'h2:has-text("All Listings")',
+        'h3:has-text("All Listings")',
         '[role="heading"]:has-text("All Listings")',
-        'h1:has-text("Your Listings")', 'h2:has-text("Your Listings")', 'h3:has-text("Your Listings")',
+        'h1:has-text("Your Listings")',
+        'h2:has-text("Your Listings")',
+        'h3:has-text("Your Listings")',
         '[role="heading"]:has-text("Your Listings")',
     ]
 
     heading = None
-    for sel in heading_selectors:
+
+    for selector in heading_selectors:
         try:
-            loc = page.locator(sel).first
-            if await loc.count() > 0 and await loc.is_visible():
-                heading = loc
+            locator = page.locator(selector).first
+
+            if (
+                await locator.count() > 0
+                and await locator.is_visible()
+            ):
+                heading = locator
                 break
+
         except Exception:
             continue
 
     if heading is None:
-        print('[publish] Listings section heading not found')
+        print("[publish] Listings section heading not found")
         return None
 
-    print('[publish] Found listings section heading')
+    print("[publish] Found listings section heading")
 
+    # ─────────────────────────────────────────────────────────────
+    # Find listings section
+    # ─────────────────────────────────────────────────────────────
     section = None
+
     section_selectors = [
-        'section',
+        "section",
         'div[role="main"]',
         'div[role="region"]',
         'div[role="presentation"]',
-        'div',
+        "div",
     ]
-    for sel in section_selectors:
+
+    for selector in section_selectors:
         try:
-            sec = page.locator(sel, has=heading).first
-            if await sec.count() > 0:
-                section = sec
+            locator = page.locator(
+                selector,
+                has=heading
+            ).first
+
+            if await locator.count() > 0:
+                section = locator
                 break
+
         except Exception:
             continue
 
     if section is None:
-        print('[publish] Unable to determine listings section container')
+        print(
+            "[publish] Unable to determine listings section container"
+        )
         return None
 
-    print('[publish] Waiting for search box inside listings section...')
+    # ─────────────────────────────────────────────────────────────
+    # Find search input
+    # ─────────────────────────────────────────────────────────────
+    print(
+        "[publish] Waiting for search box inside listings section..."
+    )
+
     search_input = section.locator(
         'input[type="search"], '
         'input[aria-label*="Search" i], '
@@ -435,82 +482,229 @@ async def _find_listing_by_title_after_publish(session: BrowserSession, title: s
     ).first
 
     try:
-        await search_input.wait_for(state='visible', timeout=60000)
-        print('[publish] Search box found inside listings section')
+        await search_input.wait_for(
+            state="visible",
+            timeout=30000
+        )
+
+        print(
+            "[publish] Search box found inside listings section"
+        )
+
     except Exception:
-        print('[publish] Search box not found inside listings section')
+        print(
+            "[publish] Search box not found inside listings section"
+        )
         return None
 
-    print(f'[publish] Searching listing title: "{title}"')
+    # ─────────────────────────────────────────────────────────────
+    # Search exact title
+    # ─────────────────────────────────────────────────────────────
+    print(
+        f'[publish] Searching listing title: "{title}"'
+    )
+
     try:
-        await search_input.fill('')
+        await search_input.fill("")
         await search_input.fill(title)
+
     except Exception as err:
-        print(f'[publish] Failed to fill search box: {err}')
+        print(
+            f"[publish] Failed to fill search box: {err}"
+        )
         return None
 
-    try:
-        await page.wait_for_load_state('networkidle', timeout=60000)
-    except Exception:
-        pass
+    # Give Facebook time to update filtered results.
+    # No networkidle.
+    await asyncio.sleep(3)
 
-    print('[publish] Waiting for filtered listing results...')
-    exact_link = section.locator(f'a:has-text("{title}")').first
+    # ─────────────────────────────────────────────────────────────
+    # Find exact listing
+    # ─────────────────────────────────────────────────────────────
+    print(
+        "[publish] Waiting for filtered listing results..."
+    )
+
+    exact_link = section.locator(
+        f'a:has-text("{title}")'
+    ).first
+
     try:
-        await exact_link.wait_for(state='visible', timeout=60000)
+        await exact_link.wait_for(
+            state="visible",
+            timeout=30000
+        )
+
     except Exception:
-        print('[publish] Exact title listing not visible in filtered results')
+        print(
+            "[publish] Exact title listing not visible "
+            "in filtered results"
+        )
         return None
 
-    print('[publish] Listing found. Opening listing...')
+    print(
+        "[publish] Listing found. Opening listing..."
+    )
+
+    # ─────────────────────────────────────────────────────────────
+    # Click listing
+    # ─────────────────────────────────────────────────────────────
+    clicked = False
+
     try:
-        await exact_link.click(force=True, timeout=10000)
+        await exact_link.click(
+            force=True,
+            timeout=10000
+        )
+        clicked = True
+
     except Exception:
         try:
             handle = await exact_link.element_handle()
+
             if handle:
-                await page.evaluate('(el) => el.click()', handle)
+                await page.evaluate(
+                    "(el) => el.click()",
+                    handle
+                )
+                clicked = True
+
         except Exception as err:
-            print(f'[publish] Failed to click listing link: {err}')
+            print(
+                f"[publish] Failed to click listing link: {err}"
+            )
             return None
 
+    if not clicked:
+        print("[publish] Listing click failed")
+        return None
+
+    # ─────────────────────────────────────────────────────────────
+    # Wait for direct listing URL
+    # ─────────────────────────────────────────────────────────────
+    item_url_pattern = re.compile(
+        r".*/(?:marketplace/)?item/\d+(?:[/?#]|$)"
+    )
+
+    print(
+        "[publish] Waiting for listing page URL..."
+    )
+
     try:
-        await page.wait_for_url(re.compile(r'.*/marketplace/item/\d+(?:[/?]|$)|.*/item/\d+(?:[/?]|$)'), timeout=60000)
-        print(f'[publish] Listing page opened: {page.url}')
+        await page.wait_for_url(
+            item_url_pattern,
+            timeout=30000
+        )
+
+        print(
+            f"[publish] Listing page opened: {page.url}"
+        )
+
         return page.url
+
     except Exception:
         pass
 
-    print('[publish] Listing click did not open item URL; checking dialog actions...')
-    dialog = page.locator('dialog, div[role="dialog"], div[aria-modal="true"]').first
-    if await dialog.count() > 0 and await dialog.is_visible():
+    # ─────────────────────────────────────────────────────────────
+    # Check dialog
+    # ─────────────────────────────────────────────────────────────
+    print(
+        "[publish] Listing URL not detected. "
+        "Checking dialog actions..."
+    )
+
+    dialog = page.locator(
+        'dialog, '
+        'div[role="dialog"], '
+        'div[aria-modal="true"]'
+    ).first
+
+    try:
+        dialog_visible = (
+            await dialog.count() > 0
+            and await dialog.is_visible()
+        )
+    except Exception:
+        dialog_visible = False
+
+    if dialog_visible:
+
         actions = [
-            'a:has-text("View listing")', 'a:has-text("See your listing")', 'a:has-text("Go to listing")',
-            'button:has-text("View listing")', 'button:has-text("See your listing")',
+            'a:has-text("View listing")',
+            'a:has-text("See your listing")',
+            'a:has-text("Go to listing")',
+            'button:has-text("View listing")',
+            'button:has-text("See your listing")',
+            'button:has-text("Go to listing")',
+            'a[href*="/marketplace/item/"]',
+            'a[href*="/item/"]',
         ]
-        for sel in actions:
+
+        for selector in actions:
             try:
-                act = dialog.locator(sel).first
-                if await act.count() > 0 and await act.is_visible():
-                    print(f'[publish] Clicking dialog action "{sel}"')
+                action = dialog.locator(
+                    selector
+                ).first
+
+                if (
+                    await action.count() > 0
+                    and await action.is_visible()
+                ):
+                    print(
+                        f'[publish] Clicking dialog action: "{selector}"'
+                    )
+
                     try:
-                        await act.click(force=True, timeout=10000)
+                        await action.click(
+                            force=True,
+                            timeout=10000
+                        )
+
                     except Exception:
-                        handle = await act.element_handle()
+                        handle = await action.element_handle()
+
                         if handle:
-                            await page.evaluate('(el) => el.click()', handle)
+                            await page.evaluate(
+                                "(el) => el.click()",
+                                handle
+                            )
+
                     try:
-                        await page.wait_for_url(re.compile(r'.*/marketplace/item/\d+(?:[/?]|$)|.*/item/\d+(?:[/?]|$)'), timeout=60000)
-                        print(f'[publish] Listing page opened: {page.url}')
+                        await page.wait_for_url(
+                            item_url_pattern,
+                            timeout=30000
+                        )
+
+                        print(
+                            f"[publish] Listing page opened: "
+                            f"{page.url}"
+                        )
+
                         return page.url
+
                     except Exception:
                         continue
+
             except Exception:
                 continue
 
-    print('[publish] Unable to open listing page from filtered title result')
-    return None
+    # ─────────────────────────────────────────────────────────────
+    # Final check
+    # ─────────────────────────────────────────────────────────────
+    current_url = page.url
 
+    if item_url_pattern.search(current_url):
+        print(
+            f"[publish] Listing page detected: {current_url}"
+        )
+        return current_url
+
+    print(
+        "[publish] Unable to open listing page "
+        "from filtered title result"
+    )
+
+    return None
 def _normalize_category(category: Optional[str]) -> Optional[str]:
     if not category:
         return None
@@ -1325,40 +1519,40 @@ async def _fill_listing_form(session: BrowserSession, listing: dict) -> bool:
 
 async def _publish_listing(session: BrowserSession) -> None:
     """
-    STEP 1-4: Click through the FB multi-step form and click Publish.
-    
-    DOES NOT extract the listing ID.
-    ID extraction happens AFTER navigating to Your Listings and opening the listing.
-    
-    Workflow:
-    1. Navigate through form steps (Next buttons) until Publish button appears
-    2. Click Publish button ONCE
-    3. Wait for publish completion (event-based)
-    4. Wait for redirected page to fully load
-    
-    Does NOT navigate or perform any lookups.
-    Does NOT extract listing ID from URL.
-    
-    Raises RuntimeError on failure.
+    STEP 1-4: Navigate through Facebook listing form and publish.
+
+    Does not extract listing ID.
+    ID extraction happens after publish.
     """
+
     page = session.page
-    print(f"[publish] ── START PUBLISHING LISTING ──────────────────────────────────")
-    print(f"[publish] Step 1: Checking current URL: {page.url}")
+
+    print("[publish] ── START PUBLISHING LISTING ─────────────────────────────")
+    print(f"[publish] Current URL: {page.url}")
 
     try:
         await _screenshot(page, "debug_pre_publish.png")
     except Exception:
         pass
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # STEP 1: Navigate through form until Publish button appears
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("[publish] Step 1: Finding Publish button...")
-    for attempt in range(8):
-        current_url = page.url
-        print(f"[publish] Step 1.{attempt+1}: Looking for buttons | URL={current_url}")
+    # ============================================================
+    # STEP 1: Find Publish button
+    # ============================================================
 
-        # Check for errors
+    print("[publish] Step 1: Finding Publish button...")
+
+    pub_vis = False
+    pub_role = None
+    pub_div = None
+
+    for attempt in range(8):
+
+        print(
+            f"[publish] Step 1.{attempt + 1}: "
+            f"Checking buttons | URL={page.url}"
+        )
+
+        # Check Facebook errors
         error_el = page.locator(
             '[role="alert"], '
             'div[data-visualcompletion="error"], '
@@ -1366,205 +1560,463 @@ async def _publish_listing(session: BrowserSession) -> None:
             'span:has-text("try again"), '
             'div:has-text("Something went wrong")'
         )
-        if await error_el.count() > 0:
-            err_text = (await error_el.first.inner_text()).strip()
+
+        try:
+            if await error_el.count() > 0:
+                err_text = (await error_el.first.inner_text()).strip()
+
+                if err_text:
+                    try:
+                        await _screenshot(
+                            page,
+                            "debug_publish_error.png"
+                        )
+                    except Exception:
+                        pass
+
+                    raise RuntimeError(
+                        f"Facebook error during publish: {err_text}"
+                    )
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+        # Publish buttons
+        pub_role = page.get_by_role(
+            "button",
+            name="Publish"
+        )
+
+        pub_div = page.locator(
+            'div[role="button"]:has-text("Publish")'
+        )
+
+        # Next buttons
+        next_role = page.get_by_role(
+            "button",
+            name="Next"
+        )
+
+        next_div = page.locator(
+            'div[role="button"]:has-text("Next")'
+        )
+
+        pub_vis = False
+        next_vis = False
+
+        try:
+            if await pub_role.count() > 0:
+                pub_vis = await pub_role.first.is_visible()
+        except Exception:
+            pass
+
+        if not pub_vis:
             try:
-                await _screenshot(page, "debug_publish_error.png")
+                if await pub_div.count() > 0:
+                    pub_vis = await pub_div.first.is_visible()
             except Exception:
                 pass
-            raise RuntimeError(f"Facebook error during publish: {err_text}")
 
-        # Check for buttons
-        pub_role  = page.get_by_role("button", name="Publish")
-        pub_div   = page.locator('div[role="button"]:has-text("Publish")')
-        next_role = page.get_by_role("button", name="Next")
-        next_div  = page.locator('div[role="button"]:has-text("Next")')
+        try:
+            if await next_role.count() > 0:
+                next_vis = await next_role.first.is_visible()
+        except Exception:
+            pass
 
-        pub_vis  = await pub_role.first.is_visible()  if await pub_role.count()  > 0 else False
-        pub_vis  = pub_vis or (await pub_div.first.is_visible()  if await pub_div.count()  > 0 else False)
-        next_vis = await next_role.first.is_visible() if await next_role.count() > 0 else False
-        next_vis = next_vis or (await next_div.first.is_visible() if await next_div.count() > 0 else False)
+        if not next_vis:
+            try:
+                if await next_div.count() > 0:
+                    next_vis = await next_div.first.is_visible()
+            except Exception:
+                pass
 
-        print(f"[publish] Step 1.{attempt+1}: Publish visible={pub_vis}, Next visible={next_vis}")
+        print(
+            f"[publish] Step 1.{attempt + 1}: "
+            f"Publish={pub_vis}, Next={next_vis}"
+        )
 
+        # Publish found
         if pub_vis:
-            print(f"[publish] Step 1: ✓ Publish button found on attempt {attempt+1}")
+            print(
+                f"[publish] Step 1: ✓ Publish found "
+                f"on attempt {attempt + 1}"
+            )
             break
 
+        # Next found
         if next_vis:
-            btn = next_role if await next_role.count() > 0 else next_div
-            lbl = (await btn.first.inner_text()).strip()
-            print(f"[publish] Step 1.{attempt+1}: Clicking Next button: '{lbl}'")
+
+            btn = (
+                next_role
+                if await next_role.count() > 0
+                else next_div
+            )
+
+            print("[publish] Clicking Next...")
+
             try:
-                await btn.first.click(force=True, timeout=12000)
+                await btn.first.click(
+                    force=True,
+                    timeout=15000
+                )
             except Exception:
-                handle = await btn.first.element_handle()
-                if handle:
-                    await page.evaluate("(el) => el.click()", handle)
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+
+                try:
+                    handle = await btn.first.element_handle()
+
+                    if handle:
+                        await page.evaluate(
+                            "(el) => el.click()",
+                            handle
+                        )
+
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to click Next button: {e}"
+                    )
+
+            # IMPORTANT:
+            # Do NOT wait for networkidle here.
+            try:
+                await page.wait_for_load_state(
+                    "domcontentloaded",
+                    timeout=30000
+                )
+            except Exception:
+                pass
+
             await asyncio.sleep(2)
+
             continue
 
-        print(f"[publish] Step 1.{attempt+1}: No button found, waiting 2 seconds...")
+        print(
+            "[publish] No Publish/Next button found. "
+            "Waiting 2 seconds..."
+        )
+
         await asyncio.sleep(2)
 
     if not pub_vis:
+
         try:
-            await _screenshot(page, "debug_publish_no_button.png")
+            await _screenshot(
+                page,
+                "debug_publish_no_button.png"
+            )
         except Exception:
             pass
+
         raise RuntimeError(
             "Publish button never appeared after 8 attempts. "
             "Check debug_publish_no_button.png"
         )
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # STEP 2: Click Publish button ONCE
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("[publish] Step 2: Click Publish...")
-    btn = pub_role if await pub_role.count() > 0 else pub_div
-    try:
-        await btn.first.click(force=True, timeout=12000)
-    except Exception:
-        handle = await btn.first.element_handle()
-        if handle:
-            await page.evaluate("(el) => el.click()", handle)
-    print("[publish] Step 2: ✓ Publish button clicked")
+    # ============================================================
+    # STEP 2: Click Publish ONCE
+    # ============================================================
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # STEP 3: Wait for publish completion (event-based)
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("[publish] Step 3: Waiting for publish completion...")
-    await asyncio.sleep(1)
+    print("[publish] Step 2: Clicking Publish...")
 
-    # Check for errors after click
-    error_el = page.locator(
-        '[role="alert"], '
-        'span:has-text("went wrong"), '
-        'span:has-text("try again"), '
-        'div:has-text("Something went wrong")'
+    btn = (
+        pub_role
+        if await pub_role.count() > 0
+        else pub_div
     )
-    if await error_el.count() > 0:
-        err_text = (await error_el.first.inner_text()).strip()
+
+    try:
+        await btn.first.click(
+            force=True,
+            timeout=15000
+        )
+
+    except Exception:
+
         try:
-            await _screenshot(page, "debug_publish_post_error.png")
-        except Exception:
-            pass
-        await _discard_failed_create(session)
-        raise RuntimeError(f"Facebook error after Publish click: {err_text}")
+            handle = await btn.first.element_handle()
+
+            if handle:
+                await page.evaluate(
+                    "(el) => el.click()",
+                    handle
+                )
+            else:
+                raise RuntimeError(
+                    "Publish button element not available"
+                )
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to click Publish button: {e}"
+            )
+
+    print("[publish] Step 2: ✓ Publish clicked")
+
+    # ============================================================
+    # STEP 3: Wait for publish completion
+    # ============================================================
+
+    print("[publish] Step 3: Waiting for publish completion...")
+
+    await asyncio.sleep(2)
+
+    # Check immediate Facebook error
+    try:
+
+        error_el = page.locator(
+            '[role="alert"], '
+            'span:has-text("went wrong"), '
+            'span:has-text("try again"), '
+            'div:has-text("Something went wrong")'
+        )
+
+        if await error_el.count() > 0:
+
+            err_text = (
+                await error_el.first.inner_text()
+            ).strip()
+
+            if err_text:
+
+                try:
+                    await _screenshot(
+                        page,
+                        "debug_publish_post_error.png"
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    await _discard_failed_create(session)
+                except Exception:
+                    pass
+
+                raise RuntimeError(
+                    f"Facebook error after Publish click: {err_text}"
+                )
+
+    except RuntimeError:
+        raise
+
+    except Exception:
+        pass
 
     completed = False
     completion_method = None
 
-    # Condition 1: Success message appears
+    # ------------------------------------------------------------
+    # Condition 1: Success message
+    # ------------------------------------------------------------
+
     try:
-        print("[publish] Step 3: Waiting for success message...")
+
+        print(
+            "[publish] Checking for success message..."
+        )
+
         success_selector = (
             'span:has-text("Your listing is now live"), '
             'span:has-text("listing is live"), '
             'span:has-text("published"), '
-            'h2:has-text("Listing published"), '
             'h1:has-text("Your Listings"), '
             'h2:has-text("Your Listings"), '
             'h1:has-text("All Listings"), '
             'h2:has-text("All Listings")'
         )
-        await page.locator(success_selector).first.wait_for(state="visible", timeout=120000)
+
+        await page.locator(
+            success_selector
+        ).first.wait_for(
+            state="visible",
+            timeout=90000
+        )
+
         completed = True
         completion_method = "success_message"
+
+        print(
+            "[publish] ✓ Success detected"
+        )
+
     except Exception:
         pass
 
+    # ------------------------------------------------------------
     # Condition 2: Publish button disappears
+    # ------------------------------------------------------------
+
     if not completed:
+
         try:
-            print("[publish] Step 3: Waiting for Publish button to disappear...")
-            publish_button = page.locator('button:has-text("Publish"), div[role="button"]:has-text("Publish")')
-            await publish_button.first.wait_for(state="hidden", timeout=120000)
+
+            print(
+                "[publish] Checking Publish button disappearance..."
+            )
+
+            publish_button = page.locator(
+                'button:has-text("Publish"), '
+                'div[role="button"]:has-text("Publish")'
+            )
+
+            await publish_button.first.wait_for(
+                state="hidden",
+                timeout=90000
+            )
+
             completed = True
             completion_method = "publish_button_hidden"
+
+            print(
+                "[publish] ✓ Publish button disappeared"
+            )
+
         except Exception:
             pass
 
-    # Condition 3: URL redirect away from create-item
+    # ------------------------------------------------------------
+    # Condition 3: URL changed away from create page
+    # ------------------------------------------------------------
+
     if not completed:
+
         try:
-            print("[publish] Step 3: Waiting for redirect away from create-item...")
-            await page.wait_for_url(
-                re.compile(r'^(?!.*(/marketplace/create/item|/create)).*$'),
-                timeout=120000
+
+            print(
+                "[publish] Checking URL redirect..."
             )
+
+            await page.wait_for_url(
+                lambda url: (
+                    "/marketplace/create/item" not in url
+                    and "/marketplace/create" not in url
+                    and "/create" not in url
+                ),
+                timeout=90000
+            )
+
             completed = True
             completion_method = "url_redirect"
+
+            print(
+                f"[publish] ✓ Redirect detected: {page.url}"
+            )
+
         except Exception:
             pass
 
-    # Condition 4: Page load stabilizes
+    # ------------------------------------------------------------
+    # FINAL FALLBACK
+    # ------------------------------------------------------------
+
     if not completed:
+
         try:
-            print("[publish] Step 3: Waiting for page load to stabilize...")
-            await page.wait_for_load_state("networkidle", timeout=120000)
-            completed = True
-            completion_method = "page_load_stable"
+            await _screenshot(
+                page,
+                "debug_publish_incomplete.png"
+            )
         except Exception:
             pass
 
-    if not completed:
-        try:
-            await _screenshot(page, "debug_publish_incomplete.png")
-        except Exception:
-            pass
         raise RuntimeError(
-            "Publish request did not complete within expected time. "
+            "Publish request did not complete within "
+            "expected time. "
             "Check debug_publish_incomplete.png"
         )
 
-    print(f"[publish] Step 3: ✓ Publish completed (via: {completion_method})")
+    print(
+        f"[publish] Step 3: ✓ Publish completed "
+        f"(via: {completion_method})"
+    )
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # STEP 4: Wait for page to fully load
-    # ─────────────────────────────────────────────────────────────────────────────
-    print("[publish] Step 4: Waiting for page to fully load...")
-    try:
-        await page.wait_for_load_state("domcontentloaded", timeout=60000)
-        print("[publish] Step 4: ✓ DOM content loaded")
-    except Exception as e:
-        print(f"[publish] Step 4: DOM load timeout: {e}")
+    # ============================================================
+    # STEP 4: DOM stabilization ONLY
+    # NO networkidle
+    # ============================================================
+
+    print(
+        "[publish] Step 4: Waiting for DOM to stabilize..."
+    )
 
     try:
-        await page.wait_for_load_state("networkidle", timeout=60000)
-        print("[publish] Step 4: ✓ Page fully loaded")
+        await page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=30000
+        )
+        print(
+            "[publish] Step 4: ✓ DOM loaded"
+        )
     except Exception:
         pass
 
-    print(f"[publish] Step 4: Current URL: {page.url}")
-    print(f"[publish] ── PUBLISH CLICK COMPLETE ──────────────────────────────────")
-    # Note: ID extraction happens in next function, not here
+    # Give Facebook SPA time to render.
+    await asyncio.sleep(3)
 
+    print(
+        f"[publish] Step 4: Current URL: {page.url}"
+    )
 
-async def _extract_listing_id_after_publish(session: BrowserSession, listing_title: str) -> dict:
+    print(
+        "[publish] ── PUBLISH CLICK COMPLETE ─────────────────────────────"
+    )
+
+async def _extract_listing_id_after_publish(
+    session: BrowserSession,
+    listing_title: str
+) -> dict:
     """
-    STEPS 5-10: Search the Selling page for the newly published listing,
-    open the top result, wait for the listing page, and extract the Listing ID.
+    STEPS 5-10:
+    Search Selling page for the newly published listing,
+    open the listing page, and extract the Listing ID.
 
-    The Listing ID MUST come only from the listing page URL after opening it.
+    Listing ID is extracted ONLY from the final listing URL.
     """
+
     page = session.page
-    print(f"[publish] Step 5: Preparing Selling page search")
+
+    # ============================================================
+    # STEP 5: Open Selling page
+    # ============================================================
+
+    print("[publish] Step 5: Preparing Selling page search")
+
     if MARKETPLACE_LISTINGS not in page.url:
-        print(f"[publish] Step 5: Navigating to Selling page: {MARKETPLACE_LISTINGS}")
+
+        print(
+            f"[publish] Step 5: Navigating to: "
+            f"{MARKETPLACE_LISTINGS}"
+        )
+
         try:
-            await page.goto(MARKETPLACE_LISTINGS, timeout=90000)
-            await page.wait_for_load_state("domcontentloaded", timeout=60000)
-            await asyncio.sleep(2)
+            await page.goto(
+                MARKETPLACE_LISTINGS,
+                timeout=90000,
+                wait_until="domcontentloaded"
+            )
+
+            await asyncio.sleep(3)
+
         except Exception as e:
+
             try:
-                await _screenshot(page, "debug_marketplace_selling_navigation_failed.png")
+                await _screenshot(
+                    page,
+                    "debug_marketplace_selling_navigation_failed.png"
+                )
             except Exception:
                 pass
-            raise RuntimeError(f"Failed to open Selling page: {e}")
 
-    print(f"[publish] Step 5: Searching listing: \"{listing_title}\"")
+            raise RuntimeError(
+                f"Failed to open Selling page: {e}"
+            )
+
+    print(
+        f'[publish] Step 5: Searching listing: "{listing_title}"'
+    )
+
+    # ============================================================
+    # Find search input
+    # ============================================================
 
     search_selectors = [
         'input[type="search"]',
@@ -1575,106 +2027,237 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
     ]
 
     search_input = None
-    for sel in search_selectors:
+
+    for selector in search_selectors:
+
         try:
-            locator = page.locator(sel).first
-            if await locator.count() > 0 and await locator.is_visible():
+            locator = page.locator(selector).first
+
+            if (
+                await locator.count() > 0
+                and await locator.is_visible()
+            ):
                 search_input = locator
-                print(f"[publish] Step 5: Found search input via selector: {sel}")
+
+                print(
+                    f"[publish] Step 5: "
+                    f"Found search input: {selector}"
+                )
+
                 break
+
         except Exception:
             continue
 
-    if not search_input:
+    if search_input is None:
+
         try:
-            await _screenshot(page, "debug_marketplace_search_not_found.png")
+            await _screenshot(
+                page,
+                "debug_marketplace_search_not_found.png"
+            )
         except Exception:
             pass
+
         raise RuntimeError(
-            "Marketplace search input not found on Selling page. "
-            "Check debug_marketplace_search_not_found.png"
+            "Marketplace search input not found on Selling page."
         )
 
+    # ============================================================
+    # Search listing
+    # ============================================================
+
     try:
+
         await search_input.fill("")
         await search_input.fill(listing_title)
-        await search_input.press("Enter")
-        print(f"[publish] Step 5: Search submitted")
+
+        try:
+            await search_input.press("Enter")
+        except Exception:
+            pass
+
+        print("[publish] Step 5: Search submitted")
+
     except Exception as e:
-        raise RuntimeError(f"Failed to submit search query on Selling page: {e}")
 
-    results_selector = 'a[href*="/marketplace/item/"], a[href*="/item/"]'
-    try:
-        await page.wait_for_selector(results_selector, state="visible", timeout=60000)
-        print(f"[publish] Step 5: ✓ Search results visible")
-    except Exception:
-        try:
-            await _screenshot(page, "debug_search_results_not_found.png")
-        except Exception:
-            pass
         raise RuntimeError(
-            "Search results did not appear after searching listing title. "
-            "Check debug_search_results_not_found.png"
+            f"Failed to submit search query: {e}"
         )
 
-    print(f"[publish] Step 6: Selecting newest visible listing")
-    listing_link = None
+    # IMPORTANT:
+    # No networkidle here.
+    await asyncio.sleep(4)
+
+    # ============================================================
+    # STEP 6: Find listing result
+    # ============================================================
+
+    print("[publish] Step 6: Waiting for listing results")
+
+    results_selector = (
+        'a[href*="/marketplace/item/"], '
+        'a[href*="/item/"]'
+    )
+
+    try:
+
+        await page.wait_for_selector(
+            results_selector,
+            state="visible",
+            timeout=90000
+        )
+
+        print(
+            "[publish] Step 6: ✓ Search results visible"
+        )
+
+    except Exception:
+
+        try:
+            await _screenshot(
+                page,
+                "debug_search_results_not_found.png"
+            )
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "Search results did not appear after searching listing."
+        )
+
     candidates = page.locator(results_selector)
-    count = await candidates.count()
-    print(f"[publish] Step 6: {count} listing candidate(s) found")
-    for index in range(min(count, 20)):
-        candidate = candidates.nth(index)
-        if await candidate.is_visible():
-            listing_link = candidate
-            print(f"[publish] Step 6: Using candidate #{index+1}")
-            break
 
-    if not listing_link:
+    count = await candidates.count()
+
+    print(
+        f"[publish] Step 6: "
+        f"{count} listing candidate(s) found"
+    )
+
+    listing_link = None
+
+    for index in range(min(count, 20)):
+
         try:
-            await _screenshot(page, "debug_first_listing_not_found.png")
+
+            candidate = candidates.nth(index)
+
+            if await candidate.is_visible():
+
+                listing_link = candidate
+
+                print(
+                    f"[publish] Step 6: "
+                    f"Using candidate #{index + 1}"
+                )
+
+                break
+
+        except Exception:
+            continue
+
+    if listing_link is None:
+
+        try:
+            await _screenshot(
+                page,
+                "debug_first_listing_not_found.png"
+            )
         except Exception:
             pass
+
         raise RuntimeError(
-            "No visible listing card found in search results. "
-            "Check debug_first_listing_not_found.png"
+            "No visible listing card found in search results."
         )
 
+    # ============================================================
+    # STEP 7: Open listing
+    # ============================================================
+
+    print("[publish] Step 7: Opening listing")
+
     try:
-        await listing_link.click(force=True, timeout=15000)
+
+        await listing_link.click(
+            force=True,
+            timeout=15000
+        )
+
     except Exception:
+
         try:
+
             handle = await listing_link.element_handle()
+
             if handle:
-                await page.evaluate("(el) => el.click()", handle)
+
+                await page.evaluate(
+                    "(el) => el.click()",
+                    handle
+                )
+
+            else:
+                raise RuntimeError(
+                    "Listing element handle unavailable"
+                )
+
         except Exception as e:
+
             try:
-                await _screenshot(page, "debug_click_listing_failed.png")
+                await _screenshot(
+                    page,
+                    "debug_click_listing_failed.png"
+                )
             except Exception:
                 pass
-            raise RuntimeError(f"Failed to click first listing card: {e}")
 
-    print(f"[publish] Step 7: Waiting for listing navigation or dialog")
+            raise RuntimeError(
+                f"Failed to click listing: {e}"
+            )
+
+    # ============================================================
+    # STEP 7B: Dialog handling
+    # ============================================================
+
+    print(
+        "[publish] Step 7: "
+        "Checking for listing dialog"
+    )
+
+    dialog = None
+
     dialog_selectors = [
         'dialog',
         'div[role="dialog"]',
         'div[aria-modal="true"]',
-        'div[role="presentation"]',
     ]
 
-    dialog = None
-    try:
-        for sel in dialog_selectors:
-            locator = page.locator(sel).first
-            if await locator.count() > 0:
-                await locator.wait_for(state="visible", timeout=10000)
-                dialog = locator
-                print(f"[publish] Step 7: Dialog opened via selector: {sel}")
-                break
-    except Exception:
-        dialog = None
+    for selector in dialog_selectors:
 
-    if dialog:
-        print(f"[publish] Step 7: Opening listing page from dialog")
+        try:
+
+            locator = page.locator(selector).first
+
+            if await locator.count() == 0:
+                continue
+
+            if await locator.is_visible():
+
+                dialog = locator
+
+                print(
+                    f"[publish] Step 7: "
+                    f"Dialog found: {selector}"
+                )
+
+                break
+
+        except Exception:
+            continue
+
+    if dialog is not None:
+
         dialog_actions = [
             'a:has-text("View listing")',
             'a:has-text("See your listing")',
@@ -1687,78 +2270,203 @@ async def _extract_listing_id_after_publish(session: BrowserSession, listing_tit
         ]
 
         clicked = False
-        for action in dialog_actions:
+
+        for selector in dialog_actions:
+
             try:
-                element = dialog.locator(action).first
-                if await element.count() > 0 and await element.is_visible():
-                    await element.click(force=True, timeout=15000)
+
+                action = dialog.locator(
+                    selector
+                ).first
+
+                if (
+                    await action.count() > 0
+                    and await action.is_visible()
+                ):
+
+                    await action.click(
+                        force=True,
+                        timeout=15000
+                    )
+
                     clicked = True
-                    print(f"[publish] Step 7: Clicked dialog action: {action}")
+
+                    print(
+                        f"[publish] Step 7: "
+                        f"Clicked: {selector}"
+                    )
+
                     break
+
             except Exception:
                 continue
 
         if not clicked:
+
             try:
-                maybe_link = dialog.locator('a[href*="/marketplace/item/"], a[href*="/item/"]').first
-                if await maybe_link.count() > 0 and await maybe_link.is_visible():
-                    await maybe_link.click(force=True, timeout=15000)
+
+                link = dialog.locator(
+                    'a[href*="/marketplace/item/"], '
+                    'a[href*="/item/"]'
+                ).first
+
+                if (
+                    await link.count() > 0
+                    and await link.is_visible()
+                ):
+
+                    await link.click(
+                        force=True,
+                        timeout=15000
+                    )
+
                     clicked = True
-                    print("[publish] Step 7: Clicked fallback dialog link")
+
             except Exception:
                 pass
 
         if not clicked:
+
             try:
-                await _screenshot(page, "debug_dialog_open_failed.png")
+                await _screenshot(
+                    page,
+                    "debug_dialog_open_failed.png"
+                )
             except Exception:
                 pass
-            raise RuntimeError("Could not open listing from dialog popup.")
-    else:
-        print(f"[publish] Step 7: No listing dialog opened; waiting for direct navigation to listing page")
 
-    print(f"[publish] Step 8: Waiting for listing page URL")
-    item_url_pattern = re.compile(r'https?://(?:www|web)\.facebook\.com/marketplace/item/\d+')
+            raise RuntimeError(
+                "Could not open listing from dialog."
+            )
+
+    else:
+
+        print(
+            "[publish] Step 7: "
+            "No dialog detected; waiting for direct navigation"
+        )
+
+    # ============================================================
+    # STEP 8: Wait for listing URL
+    # ============================================================
+
+    print(
+        "[publish] Step 8: Waiting for listing page URL"
+    )
+
+    item_url_pattern = re.compile(
+        r'https?://(?:www|web)\.facebook\.com/'
+        r'marketplace/item/\d+'
+    )
+
     try:
-        await page.wait_for_url(item_url_pattern, timeout=60000)
-        print("[publish] Step 8: Listing page URL detected")
+
+        await page.wait_for_url(
+            item_url_pattern,
+            timeout=90000
+        )
+
+        print(
+            "[publish] Step 8: ✓ Listing URL detected"
+        )
+
     except Exception:
+
         pass
 
+    # Small DOM stabilization only.
+    await asyncio.sleep(3)
+
     final_url = page.url
+
     if not item_url_pattern.search(final_url):
+
         try:
-            await _screenshot(page, "debug_listing_page_not_open.png")
+            await _screenshot(
+                page,
+                "debug_listing_page_not_open.png"
+            )
         except Exception:
             pass
-        raise RuntimeError(f"Listing page did not open. Current URL: {final_url}")
 
-    print(f"[publish] Step 8: Listing page opened")
-    print(f"[publish] Current URL: {final_url}")
+        raise RuntimeError(
+            f"Listing page did not open. "
+            f"Current URL: {final_url}"
+        )
+
+    print(
+        "[publish] Step 8: ✓ Listing page opened"
+    )
+
+    print(
+        f"[publish] Current URL: {final_url}"
+    )
+
+    # ============================================================
+    # NO NETWORKIDLE
+    # ============================================================
 
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=15000)
-        await page.wait_for_load_state("networkidle", timeout=15000)
-        print(f"[publish] Step 8: Listing page load stable")
-    except Exception:
-        print(f"[publish] Step 8: Listing page load may still be pending")
 
-    fb_listing_id = _extract_fb_listing_id(final_url)
+        await page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=30000
+        )
+
+        print(
+            "[publish] Step 8: ✓ DOM loaded"
+        )
+
+    except Exception:
+
+        print(
+            "[publish] DOM load wait timed out; "
+            "continuing because URL is valid"
+        )
+
+    await asyncio.sleep(2)
+
+    # ============================================================
+    # STEP 9: Extract Listing ID
+    # ============================================================
+
+    fb_listing_id = _extract_fb_listing_id(
+        final_url
+    )
+
     if not fb_listing_id:
+
         try:
-            await _screenshot(page, "debug_listing_id_extraction_failed.png")
+            await _screenshot(
+                page,
+                "debug_listing_id_extraction_failed.png"
+            )
         except Exception:
             pass
-        raise RuntimeError(f"Could not extract listing ID from URL: {final_url}")
 
-    print(f"[publish] Step 9: Listing ID extracted: {fb_listing_id}")
-    print(f"[publish] Step 10: Returning listing information")
+        raise RuntimeError(
+            f"Could not extract listing ID from URL: "
+            f"{final_url}"
+        )
+
+    print(
+        f"[publish] Step 9: "
+        f"Listing ID extracted: {fb_listing_id}"
+    )
+
+    # ============================================================
+    # STEP 10: Return
+    # ============================================================
+
+    print(
+        "[publish] Step 10: "
+        "Returning listing information"
+    )
 
     return {
         "facebook_listing_id": fb_listing_id,
         "facebook_listing_url": final_url,
     }
-
 
 async def _discard_failed_create(session: BrowserSession) -> bool:
     page = session.page
